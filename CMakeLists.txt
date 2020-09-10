@@ -3,6 +3,8 @@
 #
 cmake_minimum_required (VERSION 3.8)
 
+set(CMAKE_CXX_STANDARD 17)
+add_definitions(-D_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS)
 find_package(LLVM REQUIRED CONFIG PATHS ../llvm-build/lib/cmake/llvm NO_DEFAULT_PATH)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
@@ -28,6 +30,9 @@ set(codegen_sources
 
     src/parser.h
     src/parser.cpp
+
+    src/name-resolver.h
+    src/name-resolver.cpp
 )
 add_executable(codegen
     ${codegen_sources}

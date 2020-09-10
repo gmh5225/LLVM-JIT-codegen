@@ -71,6 +71,7 @@ struct ClassSolver : Solver {
 				for (auto& f : cls->fields) {
 					if (f->name == name)
 						set_result(f);
+
 				}
 				for (auto& m : cls->methods) {
 					if (m->name == name)
