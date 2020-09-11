@@ -38,7 +38,6 @@ struct Parser {
 	int line = 0, pos = 0;
 	const char* cur = nullptr;
 	pin<Module> module;
-	unordered_map<pin<Name>, pin<ast::DataDef>> locals;
 	pin<ast::Block> block_for_return_statement;
 	pin<ast::Block> block_for_break_statement;
 	pin<ast::Block> block_for_continue_statement;
@@ -55,6 +54,7 @@ struct Parser {
 	{
 		module = new Module();
 		dom->set_name(module, module_name);
+		module->name = module_name;
 		ast->modules.push_back(module);
 		active_modules.push_back(module_name);
 		auto guard = mk_guard([&]{ active_modules.pop_back(); });
@@ -230,14 +230,10 @@ struct Parser {
 			auto var = make<ast::DataDef>();
 			local->var = var;
 			var->name = lead_as_id->var_name;
-			if (locals.find(var->name) != locals.end())
-				error("local name redefinition");
 			var->initializer = parse_expression();
 			expect(";");
-			locals.insert({var->name, local->var});
 			while (!peek('}'))
 				local->body.push_back(parse_statement());
-			locals.erase(var->name);
 			return local;
 		}
 		expect(";");
@@ -377,9 +373,6 @@ struct Parser {
 				return mk_const<ast::ConstBool>(false);
 			auto r = make<ast::GetVar>();
 			r->var_name = dom->names()->get(name);
-			auto it = locals.find(r->var_name);
-			if (it != locals.end())
-				r->var = it->second;
 			return r;
 		} else if (match("&")) {
 			return fill(make<ast::Weak>(), parse_un());
@@ -400,7 +393,7 @@ struct Parser {
 				r->size = parse_un();
 			return r;
 		}
-		error("expectyed expression");
+		error("expected expression");
 		return nullptr;
 	}
 

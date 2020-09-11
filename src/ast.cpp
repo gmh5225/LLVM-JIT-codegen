@@ -422,7 +422,7 @@ namespace std {
 
 std::ostream& operator<< (std::ostream& dst, ast::Node* n) {
 	if (n->module)
-		dst << n->module->name;
+		dst << n->module->name.pinned();
 	else
 		dst << "???";
 	return dst << '(' << n->line << ':' << n->pos << ')';
