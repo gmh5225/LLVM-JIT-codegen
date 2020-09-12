@@ -55,7 +55,6 @@ struct Parser {
 		module = new Module();
 		dom->set_name(module, module_name);
 		module->name = module_name;
-		ast->modules.push_back(module);
 		active_modules.push_back(module_name);
 		auto guard = mk_guard([&]{ active_modules.pop_back(); });
 		text = module_text_provider(module_name);
@@ -149,6 +148,7 @@ struct Parser {
 				}
 			}
 		}
+		ast->modules.push_back(module);
 		return module;
 	}
 
