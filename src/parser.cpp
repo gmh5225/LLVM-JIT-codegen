@@ -90,9 +90,11 @@ struct Parser {
 			expect("}");
 		}
 		while (!is_eof()) {
-			expect("class");
-			auto class_name = module_name->get(expect_id("class"));
 			auto cls = make<ast::ClassDef>();
+			cls->is_interface = match("interface");
+			if (!cls->is_interface)
+				expect("class");
+			auto class_name = module_name->get(expect_id("class"));
 			dom->set_name(cls, class_name);
 			module->classes.push_back(cls);
 			if (match("(")) {
@@ -108,7 +110,7 @@ struct Parser {
 			if (match(":")) {
 				do
 					cls->bases.push_back(parse_class_ref("expected base class name"));
-				while(match(","));
+				while (match(","));
 			}
 			expect("{");
 			while (!match("}")) {
@@ -131,6 +133,8 @@ struct Parser {
 				} else {
 					auto id = expect_id("field or override name");
 					if (match("=")) {
+						if (cls->is_interface)
+							error("intrerface can't have fields");
 						auto field = make<ast::DataDef>();
 						cls->fields.push_back(field);
 						field->name = module_name->get(id);

@@ -162,6 +162,7 @@ struct ClassParamDef: AbstractClassDef {
 };
 
 struct ClassDef: AbstractClassDef {
+	bool is_interface; // TODO: replace with role(interface, mixin, class)
 	vector<own<ClassParamDef>> type_params;
 	vector<own<MakeInstance>> bases;
 	vector<own<DataDef>> fields;

@@ -95,6 +95,7 @@ void initialize() {
 		->field("bound", pin<CppField<ClassParamDef, weak<AbstractClassDef>, &ClassParamDef::bound>>::make(weak_type));
 	AbstractClassDef::dom_type_ = (new CppClassType<AbstractClassDef>(static_dom, {"m0", "AnyClass"}));
 	ClassDef::dom_type_ = (new CppClassType<ClassDef>(static_dom, {"m0", "Class"}))
+		->field("is_interface", pin<CppField<ClassDef, bool, &ClassDef::is_interface>>::make(static_dom->mk_type(Kind::BOOL)))
 		->field("params", pin<CppField<ClassDef, vector<own<ClassParamDef>>, &ClassDef::type_params>>::make(own_vector_type))
 		->field("bases", pin<CppField<ClassDef, vector<own<MakeInstance>>, &ClassDef::bases>>::make(own_vector_type))
 		->field("fields", pin<CppField<ClassDef, vector<own<DataDef>>, &ClassDef::fields>>::make(own_vector_type))
