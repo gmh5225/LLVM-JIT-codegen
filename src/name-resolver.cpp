@@ -93,19 +93,24 @@ struct ClassSolver : Solver {
 };
 
 struct NameResolver : ast::ActionScanner {
-	unordered_set<pin<ast::ClassDef>> handled_classes;
-	list<own<Solver>> solvers;
-	pin<ast::Module> current_module;
+	unordered_map<pin<Name>, pin<Node>> locals;
+	pin<ast::ClassDef> c;
 	pin<dom::Dom> dom;
+	pin<Name> def_name;
+
+	NameResolver(pin<dom::Dom> dom, pin<ast::ClassDef> cls)
+		: c(cls)
+		, dom(dom)
+		, def_name(cls->module->name)
+	{}
 
 	pin<dom::DomItem> resolve(Node* location, pin<Name> name) {
-		for (auto i = solvers.rbegin(); i != solvers.rend(); ++i) {
-			if (auto r = (*i)->resolve(location, name))
-				return r;
-		}
+		auto it = locals.find(name);
+		if (it != locals.end())
+			return it->second;
 		if (auto n = name->domain && name->domain->domain
 			? name
-			: current_module->name->peek(name->name)) {
+			: def_name->peek(name->name)) {
 			if (auto r = dom->get_named(n))
 				return r;
 		}
@@ -126,16 +131,11 @@ struct NameResolver : ast::ActionScanner {
 				" actual:", dom::Dom::get_type(result)->get_name());
 	}
 
-	void process_class(pin<ast::ClassDef> c) {
-		if (handled_classes.find(c) != handled_classes.end())
-			return;
-		handled_classes.insert(c);
+	void process_class() {
 		for (auto& p : c->type_params)
 			resolve(p->bound, p->bound_name, p);
-		solvers.push_back(new ClassParamsSolver(c));
 		for (auto& b : c->bases)
 			process_cls_ref(b);
-		solvers.push_back(new ClassSolver(c));
 		for (auto& f : c->fields)
 			f->initializer->match(*this);
 		for (auto& m : c->methods) {
@@ -147,8 +147,6 @@ struct NameResolver : ast::ActionScanner {
 			resolve(ovr->method, ovr->method_name, ovr);
 			ovr->body->match(*this);
 		}
-		solvers.pop_back();
-		solvers.pop_back();
 	}
 	void process_cls_ref(const pin<ast::MakeInstance>& cls_def) {
 		resolve(cls_def->cls, cls_def->cls_name, cls_def);
@@ -224,18 +222,14 @@ struct NameResolver : ast::ActionScanner {
 		r->module = src.module;
 		return r;
 	}
-	void process(ltm::pin<ast::Ast> ast) {
-		for (auto& m : ast->modules) {
-			current_module = m;
-			for (auto& c : m->classes) {
-				process_class(c);
-			}
-		}
-	}
 };
 
 }  // namespace
 
 void resolve_names(ltm::pin<ast::Ast> ast) {
-	(NameResolver()).process(ast);
+	for (auto& m : ast->modules) {
+		for (auto& c : m->classes) {
+			(NameResolver(ast::static_dom, c)).process_class();
+		}
+	}
 }
