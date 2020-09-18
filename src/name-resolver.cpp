@@ -68,19 +68,24 @@ struct NameResolver : ast::ActionScanner {
 	unordered_map<pin<Name>, pin<Node>> locals;
 	pin<ast::ClassDef> cls;
 	pin<dom::Dom> dom;
-	pin<Name> def_name;
+	pin<ast::Module> cls_module;
 
 	NameResolver(pin<dom::Dom> dom)
 		: dom(dom)
-		, def_name(cls->module->name)
+		, cls_module(cls->module)
 	{}
+
+	pin<Name> make_global(const pin<Name>& name, const pin<ast::Module>& module) {
+		return name->domain && name->domain->domain
+			? name
+			: module->name->peek(name->name);
+	}
 
 	pin<dom::DomItem> resolve(Node* location, pin<Name> name) {
 		auto it = locals.find(name);
 		if (it != locals.end())
 			return it->second;
-		if (!name->domain || !name->domain->domain)
-			name = def_name->peek(name->name);
+		name = make_global(name, cls_module);
 		if (cls) {
 			if (auto r = resolve_class_member(cls, name))
 				return r;
@@ -232,9 +237,7 @@ struct ClassMembersResolver {
 		classes_under_processing.insert(c);
 		pin<ClassDef> base_class;
 		for (auto& b : c->bases) {
-			auto name = b->cls_name->domain && b->cls_name->domain->domain
-				? b->cls_name
-				: c->module->name->peek(b->cls_name->name);
+			auto name = make_global(b->cls_name, c->module);
 			if (auto base_class = ast::static_dom->get_named(name)) {
 				if (auto bc = dom::strict_cast<ClassDef>(base_class)) {
 					if (!bc->is_interface) {
@@ -249,7 +252,7 @@ struct ClassMembersResolver {
 							dst = i.second;
 					}
 				} else
-					b->error("base class name ", name, " refers to ", ast::static_dom->get_type(bc));
+					b->error("base class name ", name, " refers to ", ast::static_dom->get_type(bc)->get_name());
 			} else
 				b->error("unresolved name ", name);
 		}
@@ -269,7 +272,7 @@ void resolve_names(pin<ast::Ast> ast) {
 }
 
 pin<Node> resolve_class_member(pin<ClassDef> cls, pin<Name> name, pin<Node> location) {
-	auto it = cls->internals.find(name);
+	auto it = cls->internals.find(make_global(name, cls->module));
 	if (it == cls->internals.end())
 		location->error("name ", name, "not found in class", ast::static_dom->get_name(cls));
 	return it->second;
