@@ -5,8 +5,6 @@
 #include <list>
 #include <utility>
 
-namespace {
-
 using std::unordered_set;
 using std::unordered_map;
 using std::list;
@@ -18,38 +16,11 @@ using ltm::own;
 using ltm::pin;
 using dom::Name;
 using ast::Node;
+using ast::ClassDef;
 
-struct Solver : ltm::Object {
-	virtual pin<Node> resolve(Node* node, pin<Name> name) =0;
-	virtual ~Solver() {}
-};
+namespace {
 
-struct ClassParamsSolver : Solver {
-	pin<ast::ClassDef> cls;
-	ClassParamsSolver(pin<ast::ClassDef> cls) : cls(cls) {}
-
-	pin<Node> resolve(Node* node, pin<Name> name_to_lookup) override {
-		pin<Node> r;
-		auto set_result = [&] (pin<Node> target) {
-			if (!r) {
-				r = target;
-				return;
-			}
-			node->error("Name redefinition ", name_to_lookup, " occurence1: ", r, " occurence2:", target);
-		};
-		if (auto name = name_to_lookup->domain && name_to_lookup->domain->domain
-			? name_to_lookup
-			: cls->module->name->peek(name_to_lookup->name)) {
-			for (auto& p : cls->type_params) {
-				if (p->name == name)
-					set_result(p);
-			}
-		}
-		return r;
-	}
-	LTM_COPYABLE(ClassParamsSolver);
-};
-
+/*
 struct ClassSolver : Solver {
 	pin<ast::ClassDef> cls;
 	ClassSolver(pin<ast::ClassDef> cls) : cls(cls) {}
@@ -91,16 +62,16 @@ struct ClassSolver : Solver {
 	}
 	LTM_COPYABLE(ClassSolver);
 };
+*/
 
 struct NameResolver : ast::ActionScanner {
 	unordered_map<pin<Name>, pin<Node>> locals;
-	pin<ast::ClassDef> c;
+	pin<ast::ClassDef> cls;
 	pin<dom::Dom> dom;
 	pin<Name> def_name;
 
-	NameResolver(pin<dom::Dom> dom, pin<ast::ClassDef> cls)
-		: c(cls)
-		, dom(dom)
+	NameResolver(pin<dom::Dom> dom)
+		: dom(dom)
 		, def_name(cls->module->name)
 	{}
 
@@ -108,19 +79,21 @@ struct NameResolver : ast::ActionScanner {
 		auto it = locals.find(name);
 		if (it != locals.end())
 			return it->second;
-		if (auto n = name->domain && name->domain->domain
-			? name
-			: def_name->peek(name->name)) {
-			if (auto r = dom->get_named(n))
+		if (!name->domain || !name->domain->domain)
+			name = def_name->peek(name->name);
+		if (cls) {
+			if (auto r = resolve_class_member(cls, name))
 				return r;
 		}
+		if (auto r = dom->get_named(name))
+			return r;
 		location->error("unresolved name ", name);
 		return nullptr;
 	}
 
 	template<typename T>
 	void resolve(weak<T>& dst, pin<Name> name, pin<Node> location) {
-		if (dst)
+		if (dst || !name)
 			return;
 		auto result = resolve(location.get(), name);
 		if (auto val = dom::strict_cast<T>(result))
@@ -131,11 +104,14 @@ struct NameResolver : ast::ActionScanner {
 				" actual:", dom::Dom::get_type(result)->get_name());
 	}
 
-	void process_class() {
+	void process_class(pin<ast::ClassDef> c) {
 		for (auto& p : c->type_params)
 			resolve(p->bound, p->bound_name, p);
+		for (auto& p : c->type_params)
+			locals.insert({ p->name, p });
 		for (auto& b : c->bases)
 			process_cls_ref(b);
+		cls = c;
 		for (auto& f : c->fields)
 			f->initializer->match(*this);
 		for (auto& m : c->methods) {
@@ -224,12 +200,77 @@ struct NameResolver : ast::ActionScanner {
 	}
 };
 
-}  // namespace
+struct ClassMembersResolver {
+	pin<ast::Ast> ast;
+	unordered_set<weak<ClassDef>> processed_classes;
+	unordered_set<weak<ClassDef>> classes_under_processing;
 
-void resolve_names(ltm::pin<ast::Ast> ast) {
-	for (auto& m : ast->modules) {
-		for (auto& c : m->classes) {
-			(NameResolver(ast::static_dom, c)).process_class();
+	void set_unique(weak<Node>& dst, const own<Node>& src) {
+		if (dst)
+			src->error("duplicated member in class, see ", dst);
+		dst = src;
+	}
+	void handle_classes() {
+		for (auto& m : ast->modules) {
+			for (auto& c : m->classes) {
+				for (auto& f : c->fields)
+					set_unique(c->internals[f->name], f);
+				for (auto& m : c->methods)
+					set_unique(c->internals[m->name], m);
+			}
+		}
+		for (auto& m : ast->modules) {
+			for (auto& c : m->classes)
+				handle_bases(c);
 		}
 	}
+	void handle_bases(const pin<ClassDef>& c) {
+		if (processed_classes.find(c) != processed_classes.end())
+			return;
+		if (classes_under_processing.find(c) != classes_under_processing.end())
+			c->error("class inherites itself");
+		classes_under_processing.insert(c);
+		pin<ClassDef> base_class;
+		for (auto& b : c->bases) {
+			auto name = b->cls_name->domain && b->cls_name->domain->domain
+				? b->cls_name
+				: c->module->name->peek(b->cls_name->name);
+			if (auto base_class = ast::static_dom->get_named(name)) {
+				if (auto bc = dom::strict_cast<ClassDef>(base_class)) {
+					if (!bc->is_interface) {
+						if (base_class)
+							bc->error("class has more than one base class ", base_class);
+						base_class = bc;
+					}
+					handle_bases(bc);
+					for (auto& i : bc->internals) {
+						auto dst = c->internals[i.first];
+						if (!dst)
+							dst = i.second;
+					}
+				} else
+					b->error("base class name ", name, " refers to ", ast::static_dom->get_type(bc));
+			} else
+				b->error("unresolved name ", name);
+		}
+		classes_under_processing.erase(c);
+		processed_classes.insert(c);
+	};
+};
+
+}  // namespace
+
+void resolve_names(pin<ast::Ast> ast) {
+	ClassMembersResolver{ ast }.handle_classes();
+	for (auto& m : ast->modules) {
+		for (auto& c : m->classes)
+			NameResolver{ ast::static_dom }.process_class(c);
+	}
+}
+
+pin<Node> resolve_class_member(pin<ClassDef> cls, pin<Name> name, pin<Node> location) {
+	auto it = cls->internals.find(name);
+	if (it == cls->internals.end())
+		location->error("name ", name, "not found in class", ast::static_dom->get_name(cls));
+	return it->second;
 }

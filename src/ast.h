@@ -168,6 +168,7 @@ struct ClassDef: AbstractClassDef {
 	vector<own<DataDef>> fields;
 	vector<own<MethodDef>> methods;
 	vector<own<OverrideDef>> overrides;
+	unordered_map<own<Name>, weak<Node>> internals;
 	DECLARE_DOM_CLASS(ClassDef);
 };
 
