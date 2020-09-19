@@ -20,50 +20,6 @@ using ast::ClassDef;
 
 namespace {
 
-/*
-struct ClassSolver : Solver {
-	pin<ast::ClassDef> cls;
-	ClassSolver(pin<ast::ClassDef> cls) : cls(cls) {}
-
-	pin<Node> resolve(Node* node, pin<Name> name_to_lookup) override {
-		pin<Node> r;
-		auto set_result = [&] (pin<Node> target) {
-			if (!r) {
-				r = target;
-				return;
-			}
-			node->error("Name redefinition ", name_to_lookup, " occurence1: ", r, " occurence2:", target);
-		};
-		function<void(pin<ast::ClassDef> cls)> scan = [&] (pin<ast::ClassDef> cls) {
-			if (auto name = name_to_lookup->domain && name_to_lookup->domain->domain
-				? name_to_lookup
-				: cls->module->name->peek(name_to_lookup->name))
-			{
-				for (auto& f : cls->fields) {
-					if (f->name == name)
-						set_result(f);
-
-				}
-				for (auto& m : cls->methods) {
-					if (m->name == name)
-						set_result(m);
-				}
-				if (r)
-					return;
-			}
-			for (auto& base : cls->bases) {
-				if (auto b = dom::strict_cast<ast::ClassDef>(base->cls)) {
-					scan(b);
-				}
-			}
-		};
-		scan(cls);
-		return r;
-	}
-	LTM_COPYABLE(ClassSolver);
-};
-*/
-
 struct NameResolver : ast::ActionScanner {
 	unordered_map<pin<Name>, pin<Node>> locals;
 	pin<ast::ClassDef> cls;
@@ -109,6 +65,23 @@ struct NameResolver : ast::ActionScanner {
 				" actual:", dom::Dom::get_type(result)->get_name());
 	}
 
+	void fix_with_params(const vector<own<ast::DataDef>>& params, own<ast::Action>& body) {
+		vector<pair<pin<Name>, pin<Node>>> prev;
+		prev.reserve(params.size());
+		for (auto& p : params) {
+			auto& dst = locals[p->name];
+			prev.push_back({ p->name, dst });
+			dst = p;
+		}
+		fix(body);
+		for (auto& p : prev) {
+			if (p.second)
+				locals[p.first] = p.second;
+			else
+				locals.erase(p.first);
+		}
+	}
+
 	void process_class(pin<ast::ClassDef> c) {
 		for (auto& p : c->type_params)
 			resolve(p->bound, p->bound_name, p);
@@ -118,21 +91,31 @@ struct NameResolver : ast::ActionScanner {
 			process_cls_ref(b);
 		cls = c;
 		for (auto& f : c->fields)
-			f->initializer->match(*this);
+			fix(f->initializer);
 		for (auto& m : c->methods) {
 			for (auto& p : m->params)
-				p->initializer->match(*this);
-			m->body->match(*this);
+				fix(p->initializer);
+			fix_with_params(m->params, m->body);
 		}
 		for (auto& ovr : c->overrides) {
 			resolve(ovr->method, ovr->method_name, ovr);
-			ovr->body->match(*this);
+			fix_with_params(ovr->method->params, ovr->body);
 		}
 	}
 	void process_cls_ref(const pin<ast::MakeInstance>& cls_def) {
 		resolve(cls_def->cls, cls_def->cls_name, cls_def);
 		for (auto& p : cls_def->params)
 			process_cls_ref(p);
+	}
+	void on_local(ast::Local& node) {
+		auto& dst = locals[node.var->name];
+		auto prev = dst;
+		dst = node.var;
+		ActionScanner::on_block(node);
+		if (prev)
+			locals[node.var->name] = prev;
+		else
+			locals.erase(node.var->name);
 	}
 	void on_get_var(ast::GetVar& node) override {
 		if (node.var)
