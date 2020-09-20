@@ -375,6 +375,8 @@ struct Parser {
 				return mk_const<ast::ConstBool>(true);
 			if (name == "false")
 				return mk_const<ast::ConstBool>(false);
+			if (name == "this")
+				return make<ast::GetVar>();  // var = var_name = null
 			auto r = make<ast::GetVar>();
 			r->var_name = dom->names()->get(name);
 			return r;
