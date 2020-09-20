@@ -431,7 +431,7 @@ struct ActionMatcher {
 };
 
 struct ActionScanner : ActionMatcher {
-	own<Action>* fix_result;
+	own<Action>* fix_result = nullptr;
 	void fix(own<Action>& ptr);
 	void on_bin_op(BinaryOp& node) override;
 	void on_un_op(UnaryOp& node) override;
