@@ -109,7 +109,7 @@ struct Formatter {
 		auto name = dom->get_name(ptr);
 		if (flags & SAVED || (flags & HAS_OWN) == 0) {
 			result << "=";
-			if (auto name = dom->get_name(ptr))
+			if (name)
 				result << name;
 			else
 				result << ((flags & SAVED) ? "_" : "?") << (flags >> NUMERATOR_OFFSET);
@@ -141,10 +141,7 @@ struct Formatter {
 		case Kind::WEAK:
 			if (auto ptr = type->get_ptr(data)) {
 				auto& flags = subtree[ptr];
-				if (flags == 0)
-					flags = HAS_WEAK;
-				else
-					flags |= (flags & HAS_WEAK) << 1 | HAS_WEAK;
+				flags |= (flags & HAS_WEAK) << 1 | HAS_WEAK;
 			}
 			break;
 		case Kind::OWN:
@@ -159,10 +156,10 @@ struct Formatter {
 		if (!ptr)
 			return;
 		auto& flags = subtree[ptr];
-		if (flags == 0)
+		if ((flags & HAS_OWN) == 0)
 			flags = HAS_OWN | (numerator += (1 << NUMERATOR_OFFSET));
 		else
-			flags |= (flags & HAS_OWN) << 1 | HAS_OWN;
+			flags |= HAS_MULTIPLE_OWNS | HAS_OWN;
 		scan(Dom::get_data(ptr), Dom::get_type(ptr));
 	}
 
@@ -172,10 +169,10 @@ struct Formatter {
 	std::ostream& result;
 	static constexpr size_t
 		HAS_WEAK = 1,
-		HAS_MULTIPLE_WEAKS = HAS_WEAK << 1,
-		HAS_OWN = 4,
-		HAS_MULTIPLE_OWNS = HAS_OWN << 1,
-		SAVED = 16,
+		HAS_MULTIPLE_WEAKS = 1 << 1,
+		HAS_OWN = 1 << 2,
+		HAS_MULTIPLE_OWNS = 1 << 3,
+		SAVED = 1 << 4,
 		NUMERATOR_OFFSET = 5;
 };
 
