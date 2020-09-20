@@ -40,9 +40,9 @@ TEST(Parser, Simple) {
 		return it == texts.end() ? "" : move(it->second);
 	});
 	// auto s = std::to_string(ast, ast::static_dom);
-	std::cout << std::make_pair(ast.pinned(), ast::static_dom.pinned()) << "\n";
 	resolve_names(ast);
-//	check_types(ast);
+	std::cout << std::make_pair(ast.pinned(), ast::static_dom.pinned()) << "\n";
+	//	check_types(ast);
 }
 
 }  // namespace

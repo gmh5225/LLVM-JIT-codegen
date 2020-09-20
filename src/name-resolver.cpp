@@ -20,6 +20,12 @@ using ast::ClassDef;
 
 namespace {
 
+pin<Name> make_global(const pin<Name>& name, const pin<ast::Module>& module) {
+	return name->domain && name->domain->domain
+		? name
+		: module->name->peek(name->name);
+}
+
 struct NameResolver : ast::ActionScanner {
 	unordered_map<pin<Name>, pin<Node>> locals;
 	pin<ast::ClassDef> cls;
@@ -28,14 +34,7 @@ struct NameResolver : ast::ActionScanner {
 
 	NameResolver(pin<dom::Dom> dom)
 		: dom(dom)
-		, cls_module(cls->module)
 	{}
-
-	pin<Name> make_global(const pin<Name>& name, const pin<ast::Module>& module) {
-		return name->domain && name->domain->domain
-			? name
-			: module->name->peek(name->name);
-	}
 
 	pin<dom::DomItem> resolve(Node* location, pin<Name> name) {
 		auto it = locals.find(name);
@@ -43,7 +42,7 @@ struct NameResolver : ast::ActionScanner {
 			return it->second;
 		name = make_global(name, cls_module);
 		if (cls) {
-			if (auto r = resolve_class_member(cls, name))
+			if (auto r = resolve_class_member(cls, name, location))
 				return r;
 		}
 		if (auto r = dom->get_named(name))
@@ -83,6 +82,7 @@ struct NameResolver : ast::ActionScanner {
 	}
 
 	void process_class(pin<ast::ClassDef> c) {
+		cls_module = c->module;
 		for (auto& p : c->type_params)
 			resolve(p->bound, p->bound_name, p);
 		for (auto& p : c->type_params)
@@ -130,11 +130,15 @@ struct NameResolver : ast::ActionScanner {
 			r->cls_name = node.var_name;
 			r->cls = as_class;
 			*fix_result = r;
-		} else if (auto as_field = dom::strict_cast<ast::DataDef>(val)) {
-			auto r = make_at_location<ast::GetField>(node);
-			r->var_name = node.var_name;
-			r->var = as_field;
-			*fix_result = r;
+		} else if (auto as_data = dom::strict_cast<ast::DataDef>(val)) {
+			if (as_data->name->domain && as_data->name->domain->domain) {
+				auto r = make_at_location<ast::GetField>(node);
+				r->var_name = node.var_name;
+				r->var = as_data;
+				*fix_result = r;
+			} else {
+				node.var = as_data;
+			}
 		} else {
 			node.error("unexpected reference to ", dom::Dom::get_type(val)->get_name(), " while expected this field or class name");
 		}
@@ -147,13 +151,17 @@ struct NameResolver : ast::ActionScanner {
 		auto val = resolve(&node, node.var_name);
 		if (auto as_class = dom::strict_cast<ast::ClassDef>(val))
 			node.error("class name cannot be assigned");
-		else if (auto as_field = dom::strict_cast<ast::DataDef>(val)) {
-			auto r = make_at_location<ast::SetField>(node);
-			r->var_name = node.var_name;
-			r->var = as_field;
-			fix(node.value);
-			r->value = move(node.value);
-			*fix_result = r;
+		else if (auto as_data = dom::strict_cast<ast::DataDef>(val)) {
+			if (as_data->name->domain && as_data->name->domain->domain) {
+				auto r = make_at_location<ast::SetField>(node);
+				r->var_name = node.var_name;
+				r->var = as_data;
+				fix(node.value);
+				r->value = move(node.value);
+				*fix_result = r;
+			} else {
+				node.var = as_data;
+			}
 		} else {
 			node.error("unexpected reference to ", dom::Dom::get_type(val)->get_name(), " while expected this field or class name");
 		}
