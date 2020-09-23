@@ -9,6 +9,7 @@
 
 namespace ast {
 
+using std::move;
 using std::string;
 using std::unordered_map;
 using std::unordered_set;
@@ -158,7 +159,20 @@ struct ClassParamDef: AbstractClassDef {
 	weak<AbstractClassDef> bound;
 	own<Name> bound_name;
 	own<Name> name;
+	int index;  // 0-based index in class params list
 	DECLARE_DOM_CLASS(ClassParamDef);
+};
+
+struct ClassTypeContext : ltm::Object {
+	ClassTypeContext() { make_shared(); }
+	weak<MakeInstance> context;
+	own<ClassTypeContext> next;
+	ClassTypeContext() {}
+	ClassTypeContext(weak<MakeInstance> context, own<ClassTypeContext> next)
+		: context(move(context))
+		, next(move(next))
+	{}
+	LTM_COPYABLE(ClassTypeContext);
 };
 
 struct ClassDef: AbstractClassDef {
@@ -168,7 +182,8 @@ struct ClassDef: AbstractClassDef {
 	vector<own<DataDef>> fields;
 	vector<own<MethodDef>> methods;
 	vector<own<OverrideDef>> overrides;
-	unordered_map<own<Name>, weak<Node>> internals;
+	unordered_map<own<Name>, weak<Node>> internals;  // all field and methods including inherited
+	unordered_map<weak<Node>, own<ClassTypeContext>> internal_contexts;
 	DECLARE_DOM_CLASS(ClassDef);
 };
 

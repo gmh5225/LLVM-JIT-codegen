@@ -16,6 +16,7 @@ namespace {
 // using ltm::weak;
 using ltm::own;
 using ltm::pin;
+using dom::strict_cast;
 // using dom::Name;
 // using ast::Node;
 
@@ -131,9 +132,23 @@ struct Typer : ast::ActionMatcher {
 		else
 			node.p->error("expected pin pointer");
 	}
-	void on_get_var(ast::GetVar& node) override {}
-	void on_set_var(ast::SetVar& node) override {}
-	void on_get_field(ast::GetField& node) override {}
+	pin<ast::Type> remove_own_and_weak(pin<ast::Type> t) {
+		if (auto as_own = strict_cast<ast::TpOwn>(t))
+			return ast->tp_pin(as_own->cls);
+		if (auto as_weak = strict_cast<ast::TpWeak>(t))
+			return ast->tp_pin(as_weak->cls);
+		return t;
+	}
+	void on_get_var(ast::GetVar& node) override {
+		node.type = remove_own_and_weak(find_type(node.var->initializer)->type);
+	}
+	void on_set_var(ast::SetVar& node) override {
+		auto var_type = remove_own_and_weak(find_type(node.var->initializer)->type);
+		check_assignable(var_type, find_type(node.value)->type);
+	}
+	void on_get_field(ast::GetField& node) override {
+	
+	}
 	void on_set_field(ast::SetField& node) override {}
 	void on_make_instance(ast::MakeInstance& node) override {}
 	void on_array(ast::Array& node) override {}
@@ -164,11 +179,35 @@ struct Typer : ast::ActionMatcher {
 		// todo: find common base type if unque
 		a.error("incompatible types");
 	}
-
+	pin<ast::ClassTypeContext> empty_context = new ast::ClassTypeContext;
+	void fill_context(
+		const own<ast::ClassDef>& c,
+		const own<ast::ClassDef>& dst,
+		pin<ast::ClassTypeContext>& context)
+	{
+		for (auto f : c->fields) {
+			if (dst->internals[f->name] == f)
+				dst->internal_contexts[f] = context;
+		}
+		for (auto& m : c->methods) {
+			if (dst->internals[m->name] == m) {
+				dst->internal_contexts[m] = context;
+			}
+		}
+		for (auto& b : c->bases)
+			fill_context(
+				b->cls.cast<ast::ClassDef>(),
+				dst,
+				pin<ast::ClassTypeContext>::make(b, context));
+	}
 	void process() {
 		for (auto& m : ast->modules) {
 			for (auto& c : m->classes) {
-				// TODO: build category
+				fill_context(c, c, empty_context);
+			}
+		}
+		for (auto& m : ast->modules) {
+			for (auto& c : m->classes) {
 				for (auto& f: c->fields)
 					find_type(f->initializer);
 				for (auto& m : c->methods) {

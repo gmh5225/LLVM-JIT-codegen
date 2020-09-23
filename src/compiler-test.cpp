@@ -42,7 +42,7 @@ TEST(Parser, Simple) {
 	// auto s = std::to_string(ast, ast::static_dom);
 	resolve_names(ast);
 	std::cout << std::make_pair(ast.pinned(), ast::static_dom.pinned()) << "\n";
-	//	check_types(ast);
+	check_types(ast);
 }
 
 }  // namespace

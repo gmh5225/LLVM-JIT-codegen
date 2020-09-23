@@ -33,6 +33,9 @@ set(codegen_sources
 
     src/name-resolver.h
     src/name-resolver.cpp
+
+    src/type-checker.h
+    src/type-checker.cpp
 )
 add_executable(codegen
     ${codegen_sources}
