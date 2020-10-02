@@ -33,9 +33,9 @@ struct Node: dom::DomItem {
 	int line = 0;
 	int pos = 0;
 	weak<Module> module;
-	void err_out(const std::string& message);
+	void err_out(const std::string& message) const;
 	template<typename... T>
-	void error(const T&... t) { err_out(((std::stringstream() << "Error at " << this << ": ") << ... << t).str()); }
+	void error(const T&... t) const { err_out(((std::stringstream() << "Error at " << this << ": ") << ... << t).str()); }
 };
 
 struct TypeMatcher;
@@ -100,7 +100,12 @@ struct TypeMatcher {
 };
 
 struct Action: Node {
-	weak<Type> type;
+	// If node resides in a classes having type parameters,
+	// and if node type depends on these parameters,
+	// the next two fields are different,
+	// otherwise they are the same.
+	weak<Type> wild_type;  // Holds type with references to class parameters. Used to resolve parameterized type of method in-ous, and field tyes.
+	weak<Type> min_type;   // Holds type with references substituted with bounded types. Used in class internaly as guaranteed minimal type.
 	virtual void match(ActionMatcher& matcher);
 };
 
@@ -163,16 +168,15 @@ struct ClassParamDef: AbstractClassDef {
 	DECLARE_DOM_CLASS(ClassParamDef);
 };
 
-struct ClassTypeContext : ltm::Object {
-	ClassTypeContext() { make_shared(); }
+struct TypeContext : ltm::Object {
 	weak<MakeInstance> context;
-	own<ClassTypeContext> next;
-	ClassTypeContext() {}
-	ClassTypeContext(weak<MakeInstance> context, own<ClassTypeContext> next)
+	own<TypeContext> next;
+	TypeContext(weak<MakeInstance> context, own<TypeContext> next)
 		: context(move(context))
-		, next(move(next))
-	{}
-	LTM_COPYABLE(ClassTypeContext);
+		, next(move(next)) {
+		make_shared();
+	}
+	LTM_COPYABLE(TypeContext);
 };
 
 struct ClassDef: AbstractClassDef {
@@ -183,7 +187,7 @@ struct ClassDef: AbstractClassDef {
 	vector<own<MethodDef>> methods;
 	vector<own<OverrideDef>> overrides;
 	unordered_map<own<Name>, weak<Node>> internals;  // all field and methods including inherited
-	unordered_map<weak<Node>, own<ClassTypeContext>> internal_contexts;
+	unordered_map<weak<Node>, own<TypeContext>> internals_contexts;
 	DECLARE_DOM_CLASS(ClassDef);
 };
 
@@ -461,6 +465,15 @@ struct ActionScanner : ActionMatcher {
 	void on_array(Array& node) override;
 	void on_call(Call& node) override;
 };
+
+template<typename T>
+pin<T> make_at_location(Node& src) {
+	auto r = pin<T>::make();
+	r->line = src.line;
+	r->pos = src.pos;
+	r->module = src.module;
+	return r;
+}
 
 void initialize();
 

@@ -17,6 +17,7 @@ using ltm::pin;
 using dom::Name;
 using ast::Node;
 using ast::ClassDef;
+using ast::make_at_location;
 
 namespace {
 
@@ -185,14 +186,6 @@ struct NameResolver : ast::ActionScanner {
 			}
 			*fix_result = r;
 		}
-	}
-	template<typename T>
-	pin<T> make_at_location(Node& src) {
-		auto r = pin<T>::make();
-		r->line = src.line;
-		r->pos = src.pos;
-		r->module = src.module;
-		return r;
 	}
 };
 
