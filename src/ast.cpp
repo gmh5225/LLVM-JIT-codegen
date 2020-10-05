@@ -412,7 +412,7 @@ pin<MakeInstance> Ast::intern(const pin<MakeInstance>& cls) {
 	return r.first->holder;
 }
 
-void Node::err_out(const std::string& message) const {
+void Node::err_out(const std::string& message) {
 	std::cerr << message;
 	throw 1;
 }
