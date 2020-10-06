@@ -163,18 +163,6 @@ struct ClassParamDef: AbstractClassDef {
 	DECLARE_DOM_CLASS(ClassParamDef);
 };
 
-struct ClassTypeContext : ltm::Object {
-	ClassTypeContext() { make_shared(); }
-	weak<MakeInstance> context;
-	own<ClassTypeContext> next;
-	ClassTypeContext() {}
-	ClassTypeContext(weak<MakeInstance> context, own<ClassTypeContext> next)
-		: context(move(context))
-		, next(move(next))
-	{}
-	LTM_COPYABLE(ClassTypeContext);
-};
-
 struct ClassDef: AbstractClassDef {
 	bool is_interface; // TODO: replace with role(interface, mixin, class)
 	vector<own<ClassParamDef>> type_params;
@@ -183,7 +171,10 @@ struct ClassDef: AbstractClassDef {
 	vector<own<MethodDef>> methods;
 	vector<own<OverrideDef>> overrides;
 	unordered_map<own<Name>, weak<Node>> internals;  // all field and methods including inherited
-	unordered_map<weak<Node>, own<ClassTypeContext>> internal_contexts;
+	// Stores types of internals relative to this class parameters:
+	// For field - single type,
+	// For method - ret_type followed by param types
+	unordered_map<weak<Node>, vector<own<Type>>> internals_types;
 	DECLARE_DOM_CLASS(ClassDef);
 };
 
@@ -461,6 +452,15 @@ struct ActionScanner : ActionMatcher {
 	void on_array(Array& node) override;
 	void on_call(Call& node) override;
 };
+
+template<typename T>
+pin<T> make_at_location(Node& src) {
+	auto r = pin<T>::make();
+	r->line = src.line;
+	r->pos = src.pos;
+	r->module = src.module;
+	return r;
+}
 
 void initialize();
 

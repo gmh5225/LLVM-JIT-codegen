@@ -19,6 +19,7 @@ using ast::Module;
 using ast::Ast;
 using ast::Node;
 using ast::Action;
+using ast::make_at_location;
 using module_text_provider_t = const std::function<string (pin<Name> name)>&;
 
 template<typename FN>

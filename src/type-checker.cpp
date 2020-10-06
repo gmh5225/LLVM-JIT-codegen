@@ -7,18 +7,18 @@
 
 namespace {
 
-// using std::unordered_set;
+using std::unordered_set;
 // using std::unordered_map;
 // using std::list;
 // using std::pair;
 // using std::function;
-// using std::vector;
+using std::vector;
 // using ltm::weak;
 using ltm::own;
 using ltm::pin;
 using dom::strict_cast;
 // using dom::Name;
-// using ast::Node;
+using ast::Type;
 
 auto type_in_progress = own<ast::Type>::make();
 auto no_return = own<ast::Type>::make();
@@ -179,31 +179,78 @@ struct Typer : ast::ActionMatcher {
 		// todo: find common base type if unque
 		a.error("incompatible types");
 	}
-	pin<ast::ClassTypeContext> empty_context = new ast::ClassTypeContext;
-	void fill_context(
-		const own<ast::ClassDef>& c,
-		const own<ast::ClassDef>& dst,
-		pin<ast::ClassTypeContext>& context)
-	{
-		for (auto f : c->fields) {
-			if (dst->internals[f->name] == f)
-				dst->internal_contexts[f] = context;
+	struct TypeContextStripper : ast::TypeMatcher {
+		pin<Type> r;
+		pin<ast::Ast> ast;
+		pin<ast::MakeInstance> context;
+
+		void on_unmatched(Type& type) override { r = &type; }
+		void on_own(ast::TpOwn& type) override { r = ast->tp_own(strip(type.cls)); }
+		void on_weak(ast::TpWeak& type) override { r = ast->tp_weak(strip(type.cls)); }
+		void on_pin(ast::TpPin& type) override { r = ast->tp_pin(strip(type.cls)); }
+		void on_array(ast::TpArray& type) override {
+			type.element->match(*this);
+			r = ast->tp_array(r);
 		}
+		pin<ast::MakeInstance> strip(const own<ast::MakeInstance>& src) {
+			if (src->params.empty()) {
+				if (auto as_real = dom::strict_cast<ast::ClassDef>(src->cls))
+					return src;
+				if (auto as_param = dom::strict_cast<ast::ClassParamDef>(src->cls)) {
+					if (context->params.size() < as_param->index)
+						src->error("internal error - type parameter index is out of context");
+					return context->params[as_param->index];
+				} else
+					src->error("internal error - unexpected ClassDef type");
+			}
+			auto r = ast::make_at_location<ast::MakeInstance>(*src);
+			if (auto as_real = dom::strict_cast<ast::ClassDef>(src->cls))
+				r->cls = as_real;
+			else
+				src->error("type parameter cannot have parameters");
+			for (auto& p : src->params)
+				r->params.push_back(strip(p));
+			return ast->intern(r);
+		}
+		pin<Type> process(pin<ast::Ast> ast, pin<ast::MakeInstance> context, pin<Type> src) {
+			ast = move(ast);
+			context = move(context);
+			src->match(*this);
+			return r;
+		}
+	};
+	void fill_member_types(
+		const own<ast::ClassDef>& c,
+		unordered_set<pin<ast::ClassDef>>& visited)
+	{
+		if (visited.find(c) != visited.end())
+			return;
+		visited.insert(c);
+		for (auto& b : c->bases)
+			fill_member_types(b->cls.cast<ast::ClassDef>(), visited);
+		for (auto f : c->fields)
+			c->internals_types[f].push_back(f->initializer->type);
 		for (auto& m : c->methods) {
-			if (dst->internals[m->name] == m) {
-				dst->internal_contexts[m] = context;
+			auto& types = c->internals_types[m];
+			types.push_back(m->body->type);
+			for (auto& p : m->params)
+				types.push_back(p->initializer->type);
+		}
+		for (auto& b : c->bases) {
+			for (auto& m : b->cls.cast<ast::ClassDef>()->internals_types) {
+				auto& types = c->internals_types[m.first];
+				if (!types.empty())
+					c->error("internal error, member redefinition, see ", m.first.pinned());
+				for (auto& t : m.second)
+					types.push_back(TypeContextStripper().process(ast, b, t));
 			}
 		}
-		for (auto& b : c->bases)
-			fill_context(
-				b->cls.cast<ast::ClassDef>(),
-				dst,
-				pin<ast::ClassTypeContext>::make(b, context));
 	}
 	void process() {
+		unordered_set<pin<ast::ClassDef>> visited;
 		for (auto& m : ast->modules) {
 			for (auto& c : m->classes) {
-				fill_context(c, c, empty_context);
+				fill_member_types(c, visited);
 			}
 		}
 		for (auto& m : ast->modules) {
