@@ -8,12 +8,12 @@
 namespace {
 
 using std::unordered_set;
-// using std::unordered_map;
+using std::unordered_map;
 // using std::list;
 // using std::pair;
 // using std::function;
 using std::vector;
-// using ltm::weak;
+using ltm::weak;
 using ltm::own;
 using ltm::pin;
 using dom::strict_cast;
@@ -127,7 +127,7 @@ struct Typer : ast::ActionMatcher {
 			node.p->error("expected pin pointer");
 	}
 	void on_weak(ast::Weak& node) override {
-		if (auto a = dom::strict_cast<ast::TpPin>(find_type(node.p)))
+		if (auto a = dom::strict_cast<ast::TpPin>(find_type(node.p)->type))
 			node.type = ast->tp_weak(a->cls);
 		else
 			node.p->error("expected pin pointer");
@@ -139,6 +139,17 @@ struct Typer : ast::ActionMatcher {
 			return ast->tp_pin(as_weak->cls);
 		return t;
 	}
+	pin<ast::MakeInstance> extract_class(pin<ast::Type> t, ast::Node& location) {
+		// TODO: support arrays
+		if (auto as_pin = strict_cast<ast::TpPin>(t))
+			return as_pin->cls;
+		if (auto as_own = strict_cast<ast::TpOwn>(t))
+			return as_own->cls;
+		if (auto as_weak = strict_cast<ast::TpWeak>(t))
+			return as_weak->cls;
+		location.error("expression is not an object");
+		return nullptr;
+	}
 	void on_get_var(ast::GetVar& node) override {
 		node.type = remove_own_and_weak(find_type(node.var->initializer)->type);
 	}
@@ -147,7 +158,23 @@ struct Typer : ast::ActionMatcher {
 		check_assignable(var_type, find_type(node.value)->type);
 	}
 	void on_get_field(ast::GetField& node) override {
-	
+		if (node.base) {
+			auto& base_class = extract_class(
+				TypeContextStripper().process(
+					ast,
+					default_contexts[current_class],
+					find_type(node.base)->type),
+				node);
+			if (auto& as_class = dom::strict_cast<ast::ClassDef>(base_class->cls)) {
+				node.type = TypeContextStripper().process(
+					ast,
+					base_class,
+					as_class->internals_types[node.var][0]);
+			} else
+				node.error("internal error, base cannot be type parameter");
+		} else {
+			node.type = find_type(node.var->initializer)->type;
+		}
 	}
 	void on_set_field(ast::SetField& node) override {}
 	void on_make_instance(ast::MakeInstance& node) override {}
@@ -164,6 +191,11 @@ struct Typer : ast::ActionMatcher {
 		node->match(*this);
 		return node;
 	}
+
+	void check_assignable(pin<Type> dst, pin<Type> src) {
+		// TODO: 
+	}
+
 	void expect_type(pin<ast::Action> node, pin<ast::Type> type) {
 		if (node->type != type)
 			node->error("expected type", type);
@@ -228,7 +260,18 @@ struct Typer : ast::ActionMatcher {
 		visited.insert(c);
 		for (auto& b : c->bases)
 			fill_member_types(b->cls.cast<ast::ClassDef>(), visited);
-		for (auto f : c->fields)
+		current_class = c;
+		auto def_ctx = ast::make_at_location<ast::MakeInstance>(*c);
+		def_ctx->cls = c;
+		default_contexts.insert({c, def_ctx});
+		auto cls_to_mk_instance = [](const weak<ast::AbstractClassDef>& src) {
+			auto r = ast::make_at_location<ast::MakeInstance>(*src.pinned());
+			r->cls = src;
+			return r;
+		};
+		for (auto& p : c->type_params)
+			def_ctx->params.push_back(p->bound ? cls_to_mk_instance(p->bound) : ast->get_ast_object());
+		for (auto& f : c->fields)
 			c->internals_types[f].push_back(f->initializer->type);
 		for (auto& m : c->methods) {
 			auto& types = c->internals_types[m];
@@ -249,12 +292,12 @@ struct Typer : ast::ActionMatcher {
 	void process() {
 		unordered_set<pin<ast::ClassDef>> visited;
 		for (auto& m : ast->modules) {
-			for (auto& c : m->classes) {
+			for (auto& c : m->classes)
 				fill_member_types(c, visited);
-			}
 		}
 		for (auto& m : ast->modules) {
 			for (auto& c : m->classes) {
+				current_class = c;
 				for (auto& f: c->fields)
 					find_type(f->initializer);
 				for (auto& m : c->methods) {
@@ -267,7 +310,9 @@ struct Typer : ast::ActionMatcher {
 			}
 		}
 	}
+	unordered_map<weak<ast::ClassDef>, own<ast::MakeInstance>> default_contexts;
 	pin<ast::Ast> ast;
+	pin<ast::ClassDef> current_class;
 };
 
 }  // namespace

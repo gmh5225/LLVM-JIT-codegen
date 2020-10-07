@@ -355,6 +355,14 @@ bool class_key_comparer::operator() (const class_key& a, const class_key& b) con
 	return true;
 }
 
+Ast::Ast() {
+	auto ast_class = pin<ClassDef>::make();
+	static_dom->set_name(ast_class, static_dom->names()->get("Object"));
+	ast_object = pin<ast::MakeInstance>::make();
+	ast_object->cls = ast_class;
+	intern(ast_object);
+}
+
 pin<TpInt64> Ast::tp_int64() {
 	static auto r = own<TpInt64>::make();
 	return r;

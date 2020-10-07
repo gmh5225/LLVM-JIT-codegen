@@ -108,7 +108,7 @@ struct class_key{
 	own<MakeInstance> holder;
 	MakeInstance& data;
 	explicit class_key(const pin<MakeInstance>& p) : data(*p) {}
-	explicit class_key(const class_key& src) : holder(&src.data), data(*holder) {}
+	explicit class_key(const class_key& src) : holder(src.data.shared()), data(*holder) {}
 	void operator=(const class_key& src) = delete;
 };
 
@@ -130,7 +130,9 @@ struct Ast: dom::DomItem {
 	unordered_map<own<MakeInstance>, own<TpPin>> pin_types_;
 	unordered_map<own<Type>, own<TpArray>> array_types_;
 	unordered_set<class_key, class_key_hasher, class_key_comparer> interned_;
+	own<MakeInstance> ast_object;
 
+	Ast();
 	pin<TpInt64> tp_int64();
 	pin<TpBool> tp_bool();
 	pin<TpAtom> tp_atom();
@@ -141,6 +143,7 @@ struct Ast: dom::DomItem {
 	pin<TpPin> tp_pin(const pin<MakeInstance>& target);
 	pin<TpArray> tp_array(const pin<Type>& element);
 	pin<MakeInstance> intern(const pin<MakeInstance>& cls);
+	pin<MakeInstance> get_ast_object() { return ast_object; }
 	DECLARE_DOM_CLASS(Ast);
 };
 
@@ -374,6 +377,10 @@ struct MakeInstance: Action {
 	own<Name> cls_name;
 	vector<own<MakeInstance>> params;
 	void match(ActionMatcher& matcher) override;
+	own<MakeInstance> shared() {
+		make_shared();
+		return this;
+	}
 	DECLARE_DOM_CLASS(MakeInstance);
 };
 
