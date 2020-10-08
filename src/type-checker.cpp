@@ -155,29 +155,34 @@ struct Typer : ast::ActionMatcher {
 	}
 	void on_set_var(ast::SetVar& node) override {
 		auto var_type = remove_own_and_weak(find_type(node.var->initializer)->type);
-		check_assignable(var_type, find_type(node.value)->type);
+		check_assignable(var_type, node.type = find_type(node.value)->type);
+	}
+	pin<Type> get_field_type(own<ast::Action>& base, pin<ast::DataDef> field, ast::Node& location) {
+		if (!base)
+			return find_type(field->initializer)->type;
+		auto& base_class = extract_class(
+			TypeContextStripper().process(
+				ast,
+				default_contexts[current_class],
+				find_type(base)->type),
+			location);
+		if (auto& as_class = dom::strict_cast<ast::ClassDef>(base_class->cls))
+			return TypeContextStripper().process(
+				ast,
+				base_class,
+				as_class->internals_types[field][0]);
+		location.error("internal error, base cannot be type parameter");
 	}
 	void on_get_field(ast::GetField& node) override {
-		if (node.base) {
-			auto& base_class = extract_class(
-				TypeContextStripper().process(
-					ast,
-					default_contexts[current_class],
-					find_type(node.base)->type),
-				node);
-			if (auto& as_class = dom::strict_cast<ast::ClassDef>(base_class->cls)) {
-				node.type = TypeContextStripper().process(
-					ast,
-					base_class,
-					as_class->internals_types[node.var][0]);
-			} else
-				node.error("internal error, base cannot be type parameter");
-		} else {
-			node.type = find_type(node.var->initializer)->type;
-		}
+		node.type = remove_own_and_weak(get_field_type(node.base, node.var, node));
 	}
-	void on_set_field(ast::SetField& node) override {}
-	void on_make_instance(ast::MakeInstance& node) override {}
+	void on_set_field(ast::SetField& node) override {
+		auto field_type = remove_own_and_weak(get_field_type(node.base, node.var, node));		
+		check_assignable(field_type, node.type = find_type(node.value)->type);
+	}
+	void on_make_instance(ast::MakeInstance& node) override {
+		
+	}
 	void on_array(ast::Array& node) override {}
 	void on_call(ast::Call& node) override {}
 
