@@ -100,7 +100,7 @@ struct TypeMatcher {
 };
 
 struct Action: Node {
-	weak<Type> type;
+	own<Type> type;
 	virtual void match(ActionMatcher& matcher);
 };
 

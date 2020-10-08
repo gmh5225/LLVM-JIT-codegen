@@ -28,7 +28,7 @@ struct Typer : ast::ActionMatcher {
 	void on_block(ast::Block& node) override {
 		for (auto& n : node.body)
 			find_type(n);
-		unite(node, node.body.empty()
+		unite(node, node.type, node.body.empty()
 			? ast->tp_void()
 			: node.body.back()->type);
 	}
@@ -49,7 +49,7 @@ struct Typer : ast::ActionMatcher {
 	void on_break(ast::Break& node) override {
 		if (node.result)
 			find_type(node.result);
-		unite(*node.to_break.pinned(), node.result ? node.result->type : ast->tp_void());
+		unite(node, node.to_break->type, node.result ? node.result->type : ast->tp_void());
 		node.type = no_return;
 	}
 	void on_const_i64(ast::ConstInt64& node) override { node.type = ast->tp_int64(); }
@@ -65,7 +65,7 @@ struct Typer : ast::ActionMatcher {
 		if (auto p0 = dom::strict_cast<ast::If>(node.p[0])) {
 			expect_type(find_type(p0->p[0]), ast->tp_bool());
 			node.type = p0->type = find_type(p0->p[1])->type;
-			unite(node, find_type(node.p[1])->type);
+			unite(node, node.type, find_type(node.p[1])->type);
 		} else
 			node.error("optional type is not suppored yet");
 	}
@@ -139,7 +139,7 @@ struct Typer : ast::ActionMatcher {
 			return ast->tp_pin(as_weak->cls);
 		return t;
 	}
-	pin<ast::MakeInstance> extract_class(pin<ast::Type> t, ast::Node& location) {
+	pin<ast::MakeInstance> extract_class(pin<ast::Type> t) {
 		// TODO: support arrays
 		if (auto as_pin = strict_cast<ast::TpPin>(t))
 			return as_pin->cls;
@@ -147,7 +147,6 @@ struct Typer : ast::ActionMatcher {
 			return as_own->cls;
 		if (auto as_weak = strict_cast<ast::TpWeak>(t))
 			return as_weak->cls;
-		location.error("expression is not an object");
 		return nullptr;
 	}
 	void on_get_var(ast::GetVar& node) override {
@@ -157,34 +156,52 @@ struct Typer : ast::ActionMatcher {
 		auto var_type = remove_own_and_weak(find_type(node.var->initializer)->type);
 		check_assignable(var_type, node.type = find_type(node.value)->type);
 	}
-	pin<Type> get_field_type(own<ast::Action>& base, pin<ast::DataDef> field, ast::Node& location) {
+	pin<Type> get_field_type(own<ast::Action>& base, ast::DataRef& field) {
 		if (!base)
-			return find_type(field->initializer)->type;
+			return find_type(field.var->initializer)->type;
 		auto& base_class = extract_class(
 			TypeContextStripper().process(
 				ast,
 				default_contexts[current_class],
-				find_type(base)->type),
-			location);
-		if (auto& as_class = dom::strict_cast<ast::ClassDef>(base_class->cls))
+				find_type(base)->type));
+		if (!base_class)
+			field.error("expression is not an object");
+		if (auto& as_class = dom::strict_cast<ast::ClassDef>(base_class->cls)) {
+			auto it = as_class->internals.find(field.var_name);
+			if (it != as_class->internals.end())
+				field.var = dom::strict_cast<ast::DataDef>(it->second);
+			if (!field.var)
+				field.error("no field ", field.var_name, " in class ", ast::static_dom->get_name(as_class));
 			return TypeContextStripper().process(
 				ast,
 				base_class,
-				as_class->internals_types[field][0]);
-		location.error("internal error, base cannot be type parameter");
+				as_class->internals_types[field.var][0]);
+		}
+		field.error("internal error, base cannot be a type parameter");
 	}
 	void on_get_field(ast::GetField& node) override {
-		node.type = remove_own_and_weak(get_field_type(node.base, node.var, node));
+		node.type = remove_own_and_weak(get_field_type(node.base, node));
 	}
 	void on_set_field(ast::SetField& node) override {
-		auto field_type = remove_own_and_weak(get_field_type(node.base, node.var, node));		
+		auto field_type = remove_own_and_weak(get_field_type(node.base, node));		
 		check_assignable(field_type, node.type = find_type(node.value)->type);
 	}
 	void on_make_instance(ast::MakeInstance& node) override {
-		
+		node.type = ast->tp_pin(ast->intern(&node));
 	}
-	void on_array(ast::Array& node) override {}
-	void on_call(ast::Call& node) override {}
+	void on_array(ast::Array& node) override {
+		if (node.size)
+			check_assignable(ast->tp_int64(), find_type(node.size)->type);
+		if (node.initializers.empty())
+			node.error("Cannot deduce array elements type, the array is empty");
+		own<Type> element_type = type_in_progress;
+		for (auto& e : node.initializers)
+			unite(*e, element_type, find_type(e)->type);
+		node.type = ast->tp_array(element_type);
+	}
+	void on_call(ast::Call& node) override {
+
+	}
 
 	own<ast::Action>& find_type(own<ast::Action>& node) {
 		if (node->type) {
@@ -197,8 +214,14 @@ struct Typer : ast::ActionMatcher {
 		return node;
 	}
 
-	void check_assignable(pin<Type> dst, pin<Type> src) {
-		// TODO: 
+	void check_assignable(pin<Type> dst, pin<Type> src, ast::Node& location) {
+		if (dst == src)
+			return;
+		auto dst_cls = extract_class(dst);
+		auto src_cls = extract_class(dst);
+		if (!dst_cls || !src_cls)
+			location.error("incompatible types: ", dst, " and ", src);
+		// TODO: scan in src.cls bases for dst.cls, then strict check parameters
 	}
 
 	void expect_type(pin<ast::Action> node, pin<ast::Type> type) {
@@ -206,15 +229,15 @@ struct Typer : ast::ActionMatcher {
 			node->error("expected type", type);
 	}
 
-	void unite(ast::Action& a, pin<ast::Type> b) {
-		if (a.type == b)
+	void unite(ast::Node& location, own<Type>& a, pin<Type> b) {
+		if (a == b)
 			return;
-		if (a.type == type_in_progress) {
-			a.type = b;
+		if (a == type_in_progress) {
+			a = b;
 			return;
 		}
-		// todo: find common base type if unque
-		a.error("incompatible types");
+		// todo: find common base type if exists and unique
+		location.error("incompatible types");
 	}
 	struct TypeContextStripper : ast::TypeMatcher {
 		pin<Type> r;
