@@ -154,11 +154,11 @@ struct Typer : ast::ActionMatcher {
 	}
 	void on_set_var(ast::SetVar& node) override {
 		auto var_type = remove_own_and_weak(find_type(node.var->initializer)->type);
-		check_assignable(var_type, node.type = find_type(node.value)->type);
+		check_assignable(var_type, node.type = find_type(node.value)->type, node);
 	}
 	pin<Type> get_field_type(own<ast::Action>& base, ast::DataRef& field) {
 		if (!base)
-			return find_type(field.var->initializer)->type;
+			return current_class->internals_types[field.var][0];
 		auto& base_class = extract_class(
 			TypeContextStripper().process(
 				ast,
@@ -184,14 +184,14 @@ struct Typer : ast::ActionMatcher {
 	}
 	void on_set_field(ast::SetField& node) override {
 		auto field_type = remove_own_and_weak(get_field_type(node.base, node));		
-		check_assignable(field_type, node.type = find_type(node.value)->type);
+		check_assignable(field_type, node.type = find_type(node.value)->type, node);
 	}
 	void on_make_instance(ast::MakeInstance& node) override {
 		node.type = ast->tp_pin(ast->intern(&node));
 	}
 	void on_array(ast::Array& node) override {
 		if (node.size)
-			check_assignable(ast->tp_int64(), find_type(node.size)->type);
+			check_assignable(ast->tp_int64(), find_type(node.size)->type, node);
 		if (node.initializers.empty())
 			node.error("Cannot deduce array elements type, the array is empty");
 		own<Type> element_type = type_in_progress;
@@ -200,9 +200,38 @@ struct Typer : ast::ActionMatcher {
 		node.type = ast->tp_array(element_type);
 	}
 	void on_call(ast::Call& node) override {
-
+		if (!node.receiver) {
+			auto& types = current_class->internals_types[node.method];
+			node.type = types[0];
+			size_t i = 0;
+			for (auto& p : node.params)
+				check_assignable(find_type(p)->type, types[++i], *p);
+			return;
+		}
+		auto& base_class = extract_class(
+			TypeContextStripper().process(
+				ast,
+				default_contexts[current_class],
+				find_type(node.receiver)->type));
+		if (!base_class)
+			node.error("expression is not an object");
+		if (auto& as_class = dom::strict_cast<ast::ClassDef>(base_class->cls)) {
+			auto it = as_class->internals.find(node.method_name);
+			if (it != as_class->internals.end())
+				node.method = dom::strict_cast<ast::MethodDef>(it->second);
+			if (!node.method)
+				node.error("no method ", node.method_name, " in class ", ast::static_dom->get_name(as_class));
+			auto& types = as_class->internals_types[node.method];
+			node.type = TypeContextStripper().process(ast, base_class, types[0]);
+			size_t i = 0;
+			for (auto& p : node.params)
+				check_assignable(
+					find_type(p)->type,
+					TypeContextStripper().process(ast, base_class, types[++i]),
+					*p);
+		}
+		node.error("internal error, base cannot be a type parameter");
 	}
-
 	own<ast::Action>& find_type(own<ast::Action>& node) {
 		if (node->type) {
 			if (node->type == type_in_progress)
@@ -213,7 +242,6 @@ struct Typer : ast::ActionMatcher {
 		node->match(*this);
 		return node;
 	}
-
 	void check_assignable(pin<Type> dst, pin<Type> src, ast::Node& location) {
 		if (dst == src)
 			return;
@@ -221,14 +249,13 @@ struct Typer : ast::ActionMatcher {
 		auto src_cls = extract_class(dst);
 		if (!dst_cls || !src_cls)
 			location.error("incompatible types: ", dst, " and ", src);
+		// auto scan_bases = [&](pin<ast::ClassDef> )
 		// TODO: scan in src.cls bases for dst.cls, then strict check parameters
 	}
-
 	void expect_type(pin<ast::Action> node, pin<ast::Type> type) {
 		if (node->type != type)
 			node->error("expected type", type);
 	}
-
 	void unite(ast::Node& location, own<Type>& a, pin<Type> b) {
 		if (a == b)
 			return;
@@ -299,6 +326,8 @@ struct Typer : ast::ActionMatcher {
 		};
 		for (auto& p : c->type_params)
 			def_ctx->params.push_back(p->bound ? cls_to_mk_instance(p->bound) : ast->get_ast_object());
+		for (auto& b : c->bases)
+			c->internals_types[b->cls].push_back(ast->tp_pin(ast->intern(b)));
 		for (auto& f : c->fields)
 			c->internals_types[f].push_back(f->initializer->type);
 		for (auto& m : c->methods) {
