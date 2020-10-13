@@ -159,7 +159,7 @@ struct AbstractClassDef: Node {
 };
 
 struct ClassParamDef: AbstractClassDef {
-	weak<AbstractClassDef> bound;
+	weak<ClassDef> bound;
 	own<Name> bound_name;
 	own<Name> name;
 	int index;  // 0-based index in class params list

@@ -92,7 +92,7 @@ void initialize() {
 		->field("version", pin<CppField<Module, size_t, &Module::version>>::make(size_t_type))
 		->field("classes", pin<CppField<Module, vector<own<ClassDef>>, &Module::classes>>::make(own_vector_type));
 	ClassParamDef::dom_type_ = (new CppClassType<ClassParamDef>(static_dom, {"m0", "ClassParam"}))
-		->field("bound", pin<CppField<ClassParamDef, weak<AbstractClassDef>, &ClassParamDef::bound>>::make(weak_type));
+		->field("bound", pin<CppField<ClassParamDef, weak<ClassDef>, &ClassParamDef::bound>>::make(weak_type));
 	AbstractClassDef::dom_type_ = (new CppClassType<AbstractClassDef>(static_dom, {"m0", "AnyClass"}));
 	ClassDef::dom_type_ = (new CppClassType<ClassDef>(static_dom, {"m0", "Class"}))
 		->field("is_interface", pin<CppField<ClassDef, bool, &ClassDef::is_interface>>::make(static_dom->mk_type(Kind::BOOL)))

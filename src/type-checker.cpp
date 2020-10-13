@@ -243,14 +243,32 @@ struct Typer : ast::ActionMatcher {
 		return node;
 	}
 	void check_assignable(pin<Type> dst, pin<Type> src, ast::Node& location) {
+		// TODO: memoize
 		if (dst == src)
 			return;
 		auto dst_cls = extract_class(dst);
 		auto src_cls = extract_class(dst);
 		if (!dst_cls || !src_cls)
 			location.error("incompatible types: ", dst, " and ", src);
-		// auto scan_bases = [&](pin<ast::ClassDef> )
-		// TODO: scan in src.cls bases for dst.cls, then strict check parameters
+		if (dst_cls == src_cls)
+			return;
+		if (dom::strict_cast<ast::ClassParamDef>(dst_cls->cls))
+			location.error("expected the same class parameter type");
+		if (src_cls->cls != dst_cls->cls) {
+			auto src_real_class = dom::strict_cast<ast::ClassParamDef>(src_cls->cls)
+				? src_cls->cls.cast<ast::ClassParamDef>()->bound
+				: src_cls->cls.cast<ast::ClassDef>();
+			auto it = src_real_class->internals_types.find(dst_cls->cls);
+			if (it == src_real_class->internals_types.end())
+				location.error("incompatible classes ", dst_cls->cls, " and ", src_real_class);
+			src_cls = extract_class(TypeContextStripper().process(ast, src_cls, it->second[0]));
+		}
+		if (dst_cls->params.size() != src_cls->params.size())
+			location.error("mismatched type parameters count", dst_cls, " and ", src_cls);
+		for (size_t i = 0, n = src_cls->params.size(); i < n; i++) {
+			if (src_cls->params[i] != dst_cls->params[i])
+				location.error("mismatched type parameter ", i, ": ", dst_cls->params[i], " and ", src_cls->params[i]);
+		}
 	}
 	void expect_type(pin<ast::Action> node, pin<ast::Type> type) {
 		if (node->type != type)
@@ -339,8 +357,13 @@ struct Typer : ast::ActionMatcher {
 		for (auto& b : c->bases) {
 			for (auto& m : b->cls.cast<ast::ClassDef>()->internals_types) {
 				auto& types = c->internals_types[m.first];
-				if (!types.empty())
-					c->error("internal error, member redefinition, see ", m.first.pinned());
+				if (!types.empty()) {
+					if (auto as_base = dom::strict_cast<ast::ClassDef>(m.first)) {
+						if (types[0] != TypeContextStripper().process(ast, b, m.second[0]))
+							c->error("interface implemented twice with different type parameters", types[0]);
+					} else
+						c->error("internal error, member redefinition, see ", m.first.pinned());
+				}
 				for (auto& t : m.second)
 					types.push_back(TypeContextStripper().process(ast, b, t));
 			}

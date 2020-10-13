@@ -105,6 +105,8 @@ struct Parser {
 					param->name = module_name->get(expect_id("type parameter"));
 					if (match(":"))
 						param->bound_name = expect_domain_name(module_name, "class parameter base");
+					else
+						param->bound = ast->get_ast_object()->cls.cast<ast::ClassDef>();
 				} while(match(","));
 				expect(")");
 			}
