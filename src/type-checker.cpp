@@ -20,8 +20,8 @@ using dom::strict_cast;
 // using dom::Name;
 using ast::Type;
 
-auto type_in_progress = own<ast::Type>::make();
-auto no_return = own<ast::Type>::make();
+auto type_in_progress = own<ast::TpVoid>::make();
+auto no_return = own<ast::TpVoid>::make();
 
 struct Typer : ast::ActionMatcher {
 	Typer(ltm::pin<ast::Ast> ast) : ast(ast) {}
@@ -178,6 +178,7 @@ struct Typer : ast::ActionMatcher {
 				as_class->internals_types[field.var][0]);
 		}
 		field.error("internal error, base cannot be a type parameter");
+		return nullptr;
 	}
 	void on_get_field(ast::GetField& node) override {
 		node.type = remove_own_and_weak(get_field_type(node.base, node));
@@ -236,7 +237,7 @@ struct Typer : ast::ActionMatcher {
 		if (node->type) {
 			if (node->type == type_in_progress)
 				node->error("cannot deduce type due circular references"); // TODO: switch to Hindley-Milner++
-			return;
+			return node;
 		}
 		node->type = type_in_progress;
 		node->match(*this);
@@ -325,7 +326,7 @@ struct Typer : ast::ActionMatcher {
 		}
 	};
 	void fill_member_types(
-		const own<ast::ClassDef>& c,
+		pin<ast::ClassDef> c,
 		unordered_set<pin<ast::ClassDef>>& visited)
 	{
 		if (visited.find(c) != visited.end())

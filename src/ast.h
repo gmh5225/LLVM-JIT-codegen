@@ -98,20 +98,17 @@ struct TypeMatcher {
 	virtual void on_pin(TpPin& type) {}
 	virtual void on_array(TpArray& type) {}
 };
-
 struct Action: Node {
 	own<Type> type;
 	virtual void match(ActionMatcher& matcher);
 };
-
 struct class_key{
 	own<MakeInstance> holder;
 	MakeInstance& data;
 	explicit class_key(const pin<MakeInstance>& p) : data(*p) {}
-	explicit class_key(const class_key& src) : holder(src.data.shared()), data(*holder) {}
+	explicit class_key(const class_key& src);
 	void operator=(const class_key& src) = delete;
 };
-
 struct class_key_hasher {
 	size_t operator() (const class_key&) const;
 };
@@ -468,6 +465,8 @@ pin<T> make_at_location(Node& src) {
 	r->module = src.module;
 	return r;
 }
+
+inline class_key::class_key(const class_key& src) : holder(src.data.shared()), data(*holder) {}
 
 void initialize();
 
