@@ -17,7 +17,7 @@ using dom::Name;
 using ast::Ast;
 
 auto source_text = R"-(
-module ak~test.1
+module ak_test.1
 
 class MyClass {
     x_ = 0;

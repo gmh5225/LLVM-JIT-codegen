@@ -437,4 +437,45 @@ std::ostream& operator<< (std::ostream& dst, ast::Node* n) {
 	return dst << '(' << n->line << ':' << n->pos << ')';
 }
 
+std::ostream& operator<< (std::ostream& dst, ltm::pin<ast::Type> t) {
+	struct type_matcher : ast::TypeMatcher {
+		std::ostream& dst;
+		type_matcher(std::ostream& dst) : dst(dst) {}
+		void on_unmatched(ast::Type& type) override { dst << "???"; }
+		void on_int64(ast::TpInt64& type) override { dst << "int"; }
+		void on_void(ast::TpVoid& type) override { dst << "void"; }
+		void on_bool(ast::TpBool& type) override { dst << "double"; }
+		void on_double(ast::TpDouble& type) override { dst << "???"; }
+		void on_atom(ast::TpAtom& type) override { dst << "atom"; }
+		void on_own(ast::TpOwn& type) override {
+			dst << "@";
+			dump(type.cls);
+		}
+		void on_weak(ast::TpWeak& type) override {
+			dst << "*";
+			dump(type.cls);
+		}
+		void on_pin(ast::TpPin& type) override { dump(type.cls); }
+		void on_array(ast::TpArray& type) override {
+			dst << "[";
+			type.element->match(*this);
+			dst << "]";
+		}
+		void dump(ltm::own<ast::MakeInstance>& t) {
+			dst << t->cls_name;
+			if (t->params.empty())
+				return;
+			bool is_first = true;
+			for (auto p : t->params) {
+				dst << (is_first ? "(" : ", ");
+				is_first = false;
+				dump(p);
+			}
+			dst << ")";
+		}
+	};
+	t->match(type_matcher(dst));
+	return dst;
+}
+
 }  // namespace std

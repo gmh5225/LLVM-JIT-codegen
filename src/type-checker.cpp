@@ -21,6 +21,7 @@ using dom::strict_cast;
 using ast::Type;
 
 auto type_in_progress = own<ast::TpVoid>::make();
+auto this_type = own<ast::TpVoid>::make();
 auto no_return = own<ast::TpVoid>::make();
 
 struct Typer : ast::ActionMatcher {
@@ -150,7 +151,10 @@ struct Typer : ast::ActionMatcher {
 		return nullptr;
 	}
 	void on_get_var(ast::GetVar& node) override {
-		node.type = remove_own_and_weak(find_type(node.var->initializer)->type);
+		if (!node.var)
+			node.type = this_type;
+		else
+			node.type = remove_own_and_weak(find_type(node.var->initializer)->type);
 	}
 	void on_set_var(ast::SetVar& node) override {
 		auto var_type = remove_own_and_weak(find_type(node.var->initializer)->type);
@@ -321,9 +325,16 @@ struct Typer : ast::ActionMatcher {
 		pin<Type> process(pin<ast::Ast> ast, pin<ast::MakeInstance> context, pin<Type> src) {
 			ast = move(ast);
 			context = move(context);
+			if (src == this_type)
+				return ast->tp_pin(context);
 			src->match(*this);
 			return r;
 		}
+	};
+	pin<ast::MakeInstance> cls_to_mk_instance(const weak<ast::AbstractClassDef>& src) {
+		auto r = ast::make_at_location<ast::MakeInstance>(*src.pinned());
+		r->cls = src;
+		return r;
 	};
 	void fill_member_types(
 		pin<ast::ClassDef> c,
@@ -338,22 +349,18 @@ struct Typer : ast::ActionMatcher {
 		auto def_ctx = ast::make_at_location<ast::MakeInstance>(*c);
 		def_ctx->cls = c;
 		default_contexts.insert({c, def_ctx});
-		auto cls_to_mk_instance = [](const weak<ast::AbstractClassDef>& src) {
-			auto r = ast::make_at_location<ast::MakeInstance>(*src.pinned());
-			r->cls = src;
-			return r;
-		};
 		for (auto& p : c->type_params)
 			def_ctx->params.push_back(p->bound ? cls_to_mk_instance(p->bound) : ast->get_ast_object());
 		for (auto& b : c->bases)
 			c->internals_types[b->cls].push_back(ast->tp_pin(ast->intern(b)));
 		for (auto& f : c->fields)
-			c->internals_types[f].push_back(f->initializer->type);
+			c->internals_types[f].push_back(find_type(f->initializer)->type);
 		for (auto& m : c->methods) {
 			auto& types = c->internals_types[m];
-			types.push_back(m->body->type);
+			types.push_back(type_in_progress);
 			for (auto& p : m->params)
-				types.push_back(p->initializer->type);
+				types.push_back(find_type(p->initializer)->type);
+			unite(*m, types[0], find_type(m->body)->type);
 		}
 		for (auto& b : c->bases) {
 			for (auto& m : b->cls.cast<ast::ClassDef>()->internals_types) {

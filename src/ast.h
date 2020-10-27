@@ -87,6 +87,7 @@ struct TpArray : Type {
 };
 
 struct TypeMatcher {
+	virtual ~TypeMatcher() = default;
 	virtual void on_unmatched(Type& type) {}
 	virtual void on_int64(TpInt64& type) {}
 	virtual void on_void(TpVoid& type) {}
@@ -476,6 +477,8 @@ namespace std {
 
 std::ostream& operator<< (std::ostream& dst, ast::Node* n);
 inline std::ostream& operator<< (std::ostream& dst, const ltm::pin<ast::Node>& n) { return dst << n.get(); }
+
+std::ostream& operator<< (std::ostream& dst, const ltm::pin<ast::Type> t);
 
 }
 

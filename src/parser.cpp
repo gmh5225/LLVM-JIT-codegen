@@ -347,8 +347,8 @@ struct Parser {
 	}
 
 	// b ; own and pin to pin, weak and opt own and opt pin to optional pin
-	// &b ; all to optional weak (weak is always optional)
-	// *b ; pin and own - copy to temp own, temp own - move, optional(C) - src?*_
+	// *b ; all to optional weak (weak is always optional)
+	// @b ; pin and own - copy to temp own, temp own - move, optional(C) - src?*_
 	// copy(C) as *C but temp own gets copied
 	// only temp_own can be assigned to own. so use (a := *b) or (a := copy(b))
 	pin<Action> parse_un_head() {
@@ -383,9 +383,9 @@ struct Parser {
 			auto r = make<ast::GetVar>();
 			r->var_name = dom->names()->get(name);
 			return r;
-		} else if (match("&")) {
-			return fill(make<ast::Weak>(), parse_un());
 		} else if (match("*")) {
+			return fill(make<ast::Weak>(), parse_un());
+		} else if (match("@")) {
 			return fill(make<ast::Own>(), parse_un());
 		} else if (match("{")) {
 			auto r = make<ast::Block>();
@@ -554,10 +554,10 @@ struct Parser {
 	}
 
 	pin<Name> match_domain_name_tail(string id, const char* message) {
-		if (!match("~"))
+		if (!match("_"))
 			return nullptr;
 		pin<Name> r = dom->names()->get(id)->get(expect_id(message));
-		while (match("~")){
+		while (match("_")){
 			string name_val = expect_id(message);
 			r = r->get(name_val);
 		}
@@ -645,8 +645,7 @@ struct Parser {
 	static bool is_alpha(char c) {
 		return
 			(c >= 'a' && c <= 'z') ||
-			(c >= 'A' && c <= 'Z') ||
-			c == '_';
+			(c >= 'A' && c <= 'Z');
 	};
 
 	static bool is_num(char c) {
@@ -667,10 +666,10 @@ struct Parser {
 		return is_alpha(c) || is_num(c);
 	};
 
-	bool match_id(string& result) {
+	bool match_id(string& result, bool* out_is_private = nullptr) {
 		if (!is_alpha(*cur))
 			return false;
-		while (is_alpha_num(*cur)) {
+		while (is_alpha_num(*cur) || (*cur == '_' && !is_alpha_num(cur[1]))) {
 			result += *cur++;
 			++pos;
 		}
