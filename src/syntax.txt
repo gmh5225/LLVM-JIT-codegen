@@ -1,16 +1,25 @@
-module name~with~domains.1 // 1-version
-{ // imports
-    other~module~name.42,   // 42-required version
-    module2.3,
-    module3.101,
+module ModuleName 1; // 1-version
+condition {
+    preconditions
+}
+substitute {
+    list of modules this one can substitute
+}
+import {
+    OtherModuleName 42;   // 42-required version
+    OtherModuleName2 11;
 }
 
-class a(type_param1, type_param2, type_param3 : bound~type(type params))
-    : base~class(with params)
-{
-    +new_method(param1:type, param2:type) : result_type {
-        body_statements
+class ClassName(TypeParam1, TypeParam2) {
+    ImplementedInterface(type params) {
+        implementationMethod1(params) { body }
     }
-    override_method.atom { body }
+    BaseClass(type params) {
+        overloadMethod(params) { body }
+        overloadMethod.atom (params) { body }
+    }
+    newMethod(param1 type, param2 type) ResultType {
+        bodyStatements
+    }
     field=initializer;
 }
