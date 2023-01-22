@@ -3,6 +3,7 @@
 #include "dom-to-string.h"
 
 using std::string;
+using std::string_view;
 using std::unordered_map;
 using ltm::pin;
 using dom::Dom;
@@ -39,12 +40,12 @@ struct Formatter {
 	}
 
 	// returns true if it's ended with object at current indent
-	bool dump(char* data, pin<TypeInfo> type, size_t indent, Role role, string object_id = string()) {
+	bool dump(char* data, pin<TypeInfo> type, size_t indent, Role role, string_view object_id = "") {
 		switch (type->get_kind()) {
 		case Kind::FLOAT: result << type->get_float(data) << "\n"; break;
 		case Kind::UINT: result << type->get_uint(data) << "\n"; break;
 		case Kind::INT: result << type->get_int(data) << "\n"; break;
-		case Kind::BOOL: result << type->get_bool(data) ? "+\n" : "-\n"; break;
+		case Kind::BOOL: result << (type->get_bool(data) ? "+\n" : "-\n"); break;
 		case Kind::ATOM:
 			result << "." << type->get_atom(data) << "\n";
 			break;
@@ -87,11 +88,9 @@ struct Formatter {
 			break;
 		case Kind::WEAK:
 			result << '*';
-			dump_ptr(type->get_ptr(data), indent, role);
-			break;
+			return dump_ptr(type->get_ptr(data), indent, role);
 		case Kind::OWN:
-			dump_ptr(type->get_ptr(data), indent, role);
-			break;
+			return dump_ptr(type->get_ptr(data), indent, role);
 		default:
 			// TODO: integrate with logger
 			std::cerr << "unsupported kind" << int(type->get_kind()) << std::endl;
@@ -100,10 +99,11 @@ struct Formatter {
 		return false;
 	}
 
-	void dump_ptr(const pin<DomItem>& ptr, size_t indent, Role role) {
+	// returns true if it's ended with object at current indent
+	bool dump_ptr(const pin<DomItem>& ptr, size_t indent, Role role) {
 		if (!ptr) {
 			result << "null\n";
-			return;
+			return false;
 		}
 		auto& flags = subtree[ptr];
 		auto name = dom->get_name(ptr);
@@ -114,14 +114,17 @@ struct Formatter {
 			else
 				result << ((flags & SAVED) ? "_" : "?") << (flags >> NUMERATOR_OFFSET);
 			result << '\n';
-		} else {
-			flags |= SAVED;
-			string id =
-				name ? "." + std::to_string(name) :
-				(flags & (HAS_MULTIPLE_OWNS || HAS_WEAK)) ? "._" + std::to_string(flags >> NUMERATOR_OFFSET) :
-				string();
-			dump(Dom::get_data(ptr), Dom::get_type(ptr), indent, role, id);
+			return false;
 		}
+		flags |= SAVED;
+		string id =
+			name ? "." + std::to_string(name) :
+			(flags & (HAS_MULTIPLE_OWNS || HAS_WEAK)) ? "._" + std::to_string(flags >> NUMERATOR_OFFSET) :
+			string();
+		string annotation = ptr->get_annotation();
+		if (!annotation.empty())
+			id += " ; " + annotation;		
+		return dump(Dom::get_data(ptr), Dom::get_type(ptr), indent, role, id);
 	}
 
 	void scan(char* data, pin<TypeInfo> type) {
@@ -157,7 +160,7 @@ struct Formatter {
 			return;
 		auto& flags = subtree[ptr];
 		if ((flags & HAS_OWN) == 0)
-			flags = HAS_OWN | (numerator += (1 << NUMERATOR_OFFSET));
+			flags |= HAS_OWN | (numerator += (1 << NUMERATOR_OFFSET));
 		else
 			flags |= HAS_MULTIPLE_OWNS | HAS_OWN;
 		scan(Dom::get_data(ptr), Dom::get_type(ptr));
@@ -195,7 +198,7 @@ ostream& operator<< (ostream& dst, const pin<Name>& name) {
 	if (!name)
 		return dst << "NULL";
 	if (name->domain && name->domain->domain) {
-		dst << name->domain << '~';
+		dst << name->domain << '_';
 	}
 	return dst << name->name;
 }

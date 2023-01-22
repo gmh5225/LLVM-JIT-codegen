@@ -1,3 +1,4 @@
+#include <list>
 #include "fake-gunit.h"
 
 namespace testing {
@@ -40,7 +41,10 @@ TestStream::~TestStream() {
 
 int main() {
 	::testing::failed_count = 0;
-	for (testing::TestRegRecord* trr = testing::tests; trr; trr = trr->next) {
+	std::list<testing::TestRegRecord*> tests;
+	for (testing::TestRegRecord* trr = testing::tests; trr; trr = trr->next)
+		tests.push_front(trr);
+	for (auto trr : tests) {
 		std::cout << "Test:" << trr->name << std::endl;
 		::testing::Test* t = trr->fn();
 		::testing::current_failed = false;

@@ -237,7 +237,7 @@ class DomItemImpl : public DomItem
 	friend class ClassType;
 
 public:
-	pin<TypeInfo> get_type() override { return type; }
+	pin<TypeInfo> get_type() const override { return type; }
 	char* get_data() override { return data; }
 
 protected:
@@ -366,26 +366,29 @@ protected:
 	LTM_COPYABLE(StructType)
 };
 
-Dom::Dom()
-	: atom_type(new AtomType)
-	, bool_type(new BoolType)
-	, string_type(new StringType)
-	, own_ptr_type(new PtrType<own<DomItem>, Kind::OWN>)
-	, weak_ptr_type(new PtrType<weak<DomItem>, Kind::WEAK>)
-	, int8_type(new IntType<int8_t>)
-	, int16_type(new IntType<int16_t>)
-	, int32_type(new IntType<int32_t>)
-	, int64_type(new IntType<int64_t>)
-	, uint8_type(new UIntType<uint8_t>)
-	, uint16_type(new UIntType<uint16_t>)
-	, uint32_type(new UIntType<uint32_t>)
-	, uint64_type(new UIntType<uint64_t>)
-	, float32_type(new FloatType<float>)
-	, float64_type(new FloatType<double>)
-	, sealed(false)
-{}
+Dom::Dom(pin<Dom> parent) : parent(parent) {
+	if (!parent) {
+		atom_type = new AtomType;
+		bool_type = new BoolType;
+		string_type = new StringType;
+		own_ptr_type = new PtrType<own<DomItem>, Kind::OWN>;
+		weak_ptr_type = new PtrType<weak<DomItem>, Kind::WEAK>;
+		int8_type = new IntType<int8_t>;
+		int16_type = new IntType<int16_t>;
+		int32_type = new IntType<int32_t>;
+		int64_type = new IntType<int64_t>;
+		uint8_type = new UIntType<uint8_t>;
+		uint16_type = new UIntType<uint16_t>;
+		uint32_type = new UIntType<uint32_t>;
+		uint64_type = new UIntType<uint64_t>;
+		float32_type = new FloatType<float>;
+		float64_type = new FloatType<double>;
+	}
+}
 
 pin<TypeInfo> Dom::mk_type(Kind kind, size_t size, pin<TypeInfo> item) {
+	if (parent)
+		return parent->mk_type(kind, size, move(item));
 	switch(kind) {
 	case Kind::ATOM: return atom_type;
 	case Kind::BOOL: return bool_type;
@@ -465,31 +468,28 @@ pin<DomItem> Dom::get_named(const pin<Name>& name) {
 }
 
 pin<TypeInfo> Dom::mk_class_or_struct_type(bool is_class, pin<Name> name, vector<pin<FieldInfo>>& fields) {
-	if (sealed) {
-		auto it = named_types.find(name);
-		if (it == named_types.end()) {
-			for (auto& f : fields)
-				f = FieldInfo::empty;
-			return TypeInfo::empty;
-		} else {
+	for (pin<Dom> d = this; d; d = d->parent) {
+		if (auto it = d->named_types.find(name); it != d->named_types.end()) {
 			for (auto& field : fields)
 				field = it->second->get_field(field->get_name());
 			return it->second;
 		}
 	}
-	auto& result = named_types[name];
-	if (!result) {
-		result = is_class
-		? pin<TypeInfo>::make<ClassType>(name, fields)
-		: pin<TypeInfo>::make<StructType>(name, fields);
-	} else {
-		for (auto& field : fields)
-			field = result->get_field(field->get_name());
+	for (pin<Dom> d = this; d; d = d->parent) {
+		if (!sealed) {
+			auto& result = named_types[name];
+			result = is_class
+				? pin<TypeInfo>::make<ClassType>(name, fields)
+				: pin<TypeInfo>::make<StructType>(name, fields);
+			return result;
+		}
 	}
-	return result;
+	for (auto& f : fields)
+		f = FieldInfo::empty;
+	return TypeInfo::empty;
 }
 
-void  Dom::reg_cpp_type(TypeWithFills* type) {
+void Dom::reg_cpp_type(TypeWithFills* type) {
 	auto& result = named_types[type->get_name()];
 	if (result) {
 		cerr << "type " << std::to_string(type->get_name()) << " redefinition" << endl;

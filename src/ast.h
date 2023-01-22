@@ -1,11 +1,12 @@
 #ifndef AST_H
 #define AST_H
 
-#include "dom.h"
-#include "dom-to-string.h"
-
 #include <sstream>
 #include <unordered_set>
+#include <map>
+
+#include "dom.h"
+#include "dom-to-string.h"
 
 namespace ast {
 
@@ -13,406 +14,451 @@ using std::move;
 using std::string;
 using std::unordered_map;
 using std::unordered_set;
+using std::map;
 using std::vector;
 using ltm::weak;
 using ltm::own;
 using ltm::pin;
 using dom::Name;
 
-struct ClassDef;
-struct Module;
-struct DataDef;
-struct MethodDef;
-struct OverrideDef;
 struct Node;  // having file position
 struct Action;  // having result, able to build code
-struct MakeInstance;
-struct ActionMatcher;
+
+template<typename... T>
+string format_str(const T&... t) { return (std::stringstream() << ... << t).str(); }
 
 struct Node: dom::DomItem {
 	int line = 0;
 	int pos = 0;
-	weak<Module> module;
 	void err_out(const std::string& message);
 	template<typename... T>
-	void error(const T&... t) { err_out(((std::stringstream() << "Error at " << this << ": ") << ... << t).str()); }
+	[[noreturn]] void error(const T&... t) { err_out(format_str("Error at ", *this, ": ", t...)); }
+	string get_annotation() override;
 };
 
 struct TypeMatcher;
+struct ActionMatcher;
 
 struct Type : dom::DomItem {
 	Type() { make_shared(); }
-	virtual void match(TypeMatcher& matcher);
+	virtual void match(TypeMatcher& matcher) = 0;
 };
 struct TpInt64 : Type {
 	void match(TypeMatcher& matcher) override;
 	DECLARE_DOM_CLASS(TpInt64);
 };
-struct TpAtom : Type {
+struct TpDouble : Type {
 	void match(TypeMatcher& matcher) override;
-	DECLARE_DOM_CLASS(TpAtom);
+	DECLARE_DOM_CLASS(TpDouble);
+};
+struct TpFunction : Type {
+	vector<own<Type>> params;  //+result
+	void match(TypeMatcher& matcher) override;
+	DECLARE_DOM_CLASS(TpFunction);
+};
+struct TpLambda : TpFunction {
+	void match(TypeMatcher& matcher) override;
+	DECLARE_DOM_CLASS(TpLambda);
+};
+struct TpColdLambda : Type {  // never called not istantiated lambdas with unknown param/result types
+	own<Type> resolved;  // this can be Lambda or ColdLambda
+	vector<weak<struct MkLambda>> callees;
+	void match(TypeMatcher& matcher) override;
+	DECLARE_DOM_CLASS(TpColdLambda);
 };
 struct TpVoid : Type {
 	void match(TypeMatcher& matcher) override;
 	DECLARE_DOM_CLASS(TpVoid);
 };
-struct TpBool : Type {  // TODO: make it optional(void)
+struct TpOptional : Type {
+	own<Type> wrapped;
+	int depth = 0;
 	void match(TypeMatcher& matcher) override;
-	DECLARE_DOM_CLASS(TpBool);
+	DECLARE_DOM_CLASS(TpOptional);
 };
-struct TpDouble : Type {
+struct Field : Node {  // TODO: combine with Var
+	own<dom::Name> name;
+	own<Action> initializer;
+	int offset = 0;
+	DECLARE_DOM_CLASS(Field);
+};
+struct TpClass : Type {
+	own<dom::Name> name;
+	vector<own<Field>> fields;
+	vector<own<struct Method>> new_methods;  // new methods ordered by source order
+	unordered_map<weak<TpClass>, vector<own<struct Method>>> overloads;  // overloads for interfaces and the base class, ordered by source order
+	weak<TpClass> base_class;
+	unordered_map<own<dom::Name>, weak<Node>> this_names;  // this names - defined and inhrited. ambiguous excluded.
+	unordered_map<           
+		weak<TpClass>,                       // base interface
+		vector<weak<struct Method>>> interface_vmts;   // inherited and overloaded methods in the order of new_methods in that interface
+	bool is_interface = false;
+
 	void match(TypeMatcher& matcher) override;
-	DECLARE_DOM_CLASS(TpDouble);
+
+	template<typename F, typename M, typename A>
+	bool handle_member(ast::Node& node, const pin<dom::Name> name, F on_field, M on_method, A on_anbiguous) {
+		if (auto m = dom::peek(this_names, name)) {
+			if (!m)
+				on_anbiguous();
+			else if (auto as_field = dom::strict_cast<ast::Field>(m))
+				on_field(as_field);
+			else if (auto as_method = dom::strict_cast<ast::Method>(m))
+				on_method(as_method);
+			else
+				node.error("internal error class member is neither method nor field");
+			return true;
+		}
+		return false;
+	}
+	DECLARE_DOM_CLASS(TpClass);
+};
+struct TpRef : Type {
+	own<TpClass> target;
+	void match(TypeMatcher& matcher) override;
+	DECLARE_DOM_CLASS(TpRef);
 };
 struct TpWeak : Type {
-	own<MakeInstance> cls;
+	own<TpClass> target;
 	void match(TypeMatcher& matcher) override;
 	DECLARE_DOM_CLASS(TpWeak);
-};
-struct TpOwn : Type {
-	own<MakeInstance> cls;
-	void match(TypeMatcher& matcher) override;
-	DECLARE_DOM_CLASS(TpOwn);
-};
-struct TpPin : Type {
-	own<MakeInstance> cls;
-	void match(TypeMatcher& matcher) override;
-	DECLARE_DOM_CLASS(TpPin);
-};
-//TODO: TpOptional
-struct TpArray : Type {
-	own<Type> element;
-	void match(TypeMatcher& matcher) override;
-	DECLARE_DOM_CLASS(TpArray);
 };
 
 struct TypeMatcher {
 	virtual ~TypeMatcher() = default;
-	virtual void on_unmatched(Type& type) {}
-	virtual void on_int64(TpInt64& type) {}
-	virtual void on_void(TpVoid& type) {}
-	virtual void on_bool(TpBool& type) {}
-	virtual void on_double(TpDouble& type) {}
-	virtual void on_atom(TpAtom& type) {}
-	virtual void on_own(TpOwn& type) {}
-	virtual void on_weak(TpWeak& type) {}
-	virtual void on_pin(TpPin& type) {}
-	virtual void on_array(TpArray& type) {}
-};
-struct Action: Node {
-	own<Type> type;
-	virtual void match(ActionMatcher& matcher);
-};
-struct class_key{
-	own<MakeInstance> holder;
-	MakeInstance& data;
-	explicit class_key(const pin<MakeInstance>& p) : data(*p) {}
-	explicit class_key(const class_key& src);
-	void operator=(const class_key& src) = delete;
-};
-struct class_key_hasher {
-	size_t operator() (const class_key&) const;
-};
-struct class_key_comparer {
-	bool operator() (const class_key&, const class_key&) const;
+	virtual void on_int64(TpInt64& type) = 0;
+	virtual void on_double(TpDouble& type) = 0;
+	virtual void on_function(TpFunction& type) = 0;
+	virtual void on_lambda(TpLambda& type) = 0;
+	virtual void on_cold_lambda(TpColdLambda& type) = 0;
+	virtual void on_void(TpVoid& type) = 0;
+	virtual void on_optional(TpOptional& type) =0;
+	virtual void on_class(TpClass& type) = 0;
+	virtual void on_ref(TpRef& type) = 0;
+	virtual void on_weak(TpWeak& type) = 0;
 };
 
-extern own<dom::Dom> static_dom;
+struct Action: Node {
+	own<Type> type_;
+	own<Type>& type();
+	virtual void match(ActionMatcher& matcher);
+	string get_annotation() override;
+};
+
+struct Var : Node {
+	own<Type> type;
+	own<dom::Name> name;
+	own<Action> initializer;  // Can be null for lambda parameter. If not null, defines the local initial value or param default value and type.
+	size_t lexical_depth = 0;
+	bool captured = false;
+	bool is_mutable = false;
+	string get_annotation() override;
+	DECLARE_DOM_CLASS(Var);
+};
+
+extern own<dom::Dom> cpp_dom;
+
+struct typelist_hasher {
+	size_t operator() (const vector<own<Type>>*) const;
+};
+struct typelist_comparer {
+	bool operator() (const vector<own<Type>>*, const vector<own<Type>>*) const;
+};
 
 struct Ast: dom::DomItem {
-	vector<own<Module>> modules;
-
-	// We use MakeInstance nodes produced by intern method as peremeterized class definitions, they are shared.
-	unordered_map<own<MakeInstance>, own<TpWeak>> weak_types_;
-	unordered_map<own<MakeInstance>, own<TpOwn>> own_types_;
-	unordered_map<own<MakeInstance>, own<TpPin>> pin_types_;
-	unordered_map<own<Type>, own<TpArray>> array_types_;
-	unordered_set<class_key, class_key_hasher, class_key_comparer> interned_;
-	own<MakeInstance> ast_object;
-
+	own<dom::Dom> dom;
+	unordered_map<const vector<own<Type>>*, own<TpLambda>, typelist_hasher, typelist_comparer> lambda_types_;
+	unordered_map<const vector<own<Type>>*, own<TpFunction>, typelist_hasher, typelist_comparer> function_types_;
+	unordered_map<own<Type>, vector<own<TpOptional>>> optional_types_;  // maps base types to all levels of its optionals
+	unordered_map<own<dom::Name>, own<TpClass>> classes_by_names;
+	unordered_map<own<dom::Name>, weak<struct Function>> functions_by_names;
+	unordered_map<own<TpClass>, own<TpRef>> refs;
+	unordered_map<own<TpClass>, own<TpWeak>> weaks;
 	Ast();
+
+	own<Function> entry_point;
+	weak<TpClass> object;
+	weak<TpClass> blob;
+	vector<own<TpClass>> classes;
+	vector<own<struct Function>> functions;
+
 	pin<TpInt64> tp_int64();
-	pin<TpBool> tp_bool();
-	pin<TpAtom> tp_atom();
-	pin<TpVoid> tp_void();
 	pin<TpDouble> tp_double();
-	pin<TpOwn> tp_own(const pin<MakeInstance>& target);
-	pin<TpWeak> tp_weak(const pin<MakeInstance>& target);
-	pin<TpPin> tp_pin(const pin<MakeInstance>& target);
-	pin<TpArray> tp_array(const pin<Type>& element);
-	pin<MakeInstance> intern(const pin<MakeInstance>& cls);
-	pin<MakeInstance> get_ast_object() { return ast_object; }
+	pin<TpVoid> tp_void();
+	pin<TpFunction> tp_function(vector<own<Type>>&& params);
+	pin<TpLambda> tp_lambda(vector<own<Type>>&& params);
+	pin<TpOptional> tp_optional(pin<Type> wrapped);
+	pin<Type> get_wrapped(pin<TpOptional> opt);
+	pin<TpRef> get_ref(pin<TpClass> target);
+	pin<TpWeak> get_weak(pin<TpClass> target);
+	pin<TpClass> get_class(pin<dom::Name> name); // gets or creates class
+	pin<TpClass> peek_class(pin<dom::Name> name); // gets class or null
+	pin<TpClass> extract_class(pin<Type> pointer); // extracts class from own, weak or pin pointer
 	DECLARE_DOM_CLASS(Ast);
 };
 
-struct Module: dom::DomItem {
-	size_t version;
-	own<Name> name;
-	vector<own<ClassDef>> classes;
-	DECLARE_DOM_CLASS(Module);
+struct ConstInt64: Action {
+	int64_t value = 0;
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(ConstInt64);
 };
 
-struct AbstractClassDef: Node {
-	DECLARE_DOM_CLASS(AbstractClassDef); // Not abstract to support strict_cast
+struct ConstDouble : Action {
+	double value = 0;
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(ConstDouble);
 };
 
-struct ClassParamDef: AbstractClassDef {
-	weak<ClassDef> bound;
-	own<Name> bound_name;
-	own<Name> name;
-	int index;  // 0-based index in class params list
-	DECLARE_DOM_CLASS(ClassParamDef);
+struct ConstVoid : Action {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(ConstVoid);
 };
 
-struct ClassDef: AbstractClassDef {
-	bool is_interface; // TODO: replace with role(interface, mixin, class)
-	vector<own<ClassParamDef>> type_params;
-	vector<own<MakeInstance>> bases;
-	vector<own<DataDef>> fields;
-	vector<own<MethodDef>> methods;
-	vector<own<OverrideDef>> overrides;
-	unordered_map<own<Name>, weak<Node>> internals;  // all field and methods including inherited
-	// Stores types of internals relative to this class parameters:
-	// For field - single type,
-	// For method - ret_type followed by param types
-	unordered_map<weak<Node>, vector<own<Type>>> internals_types;
-	DECLARE_DOM_CLASS(ClassDef);
+struct ConstBool : Action {  // it produces optional<void>
+	bool value = false;
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(ConstBool);
 };
 
-struct DataDef: Node {
-	own<Name> name;
-	own<Action> initializer; // for params it's type expression (see Action::type)
-	DECLARE_DOM_CLASS(DataDef);
-};
-
-struct MethodDef: Node {
-	vector<own<DataDef>> params;
-	own<Action> body;
-	own<Name> name;
-	DECLARE_DOM_CLASS(MethodDef);
-};
-
-struct OverrideDef: Node {
-	own<Name> atom;
-	weak<MethodDef> method;
-	own<Name> method_name;
-	own<Action> body;
-	DECLARE_DOM_CLASS(OverrideDef);
-};
-
-struct Block: Action {
+struct Block : Action {
+	vector<own<Var>> names; // locals or params
 	vector<own<Action>> body;
 	void match(ActionMatcher& matcher) override;
 	DECLARE_DOM_CLASS(Block);
 };
 
-struct Loop: Block {  // Returns break result.
+struct MkLambda : Block {  // MkLambda locals are params 
+	size_t access_depth = 0;  // most nested non-own local used by this lambda, lambda cannot be returned above this level
+	size_t lexical_depth = 0;  // its nesting level
+	vector<weak<Var>> captured_locals;  // its params and its nested blocks' locals that were captured by nested lambdas
+	vector<weak<Var>> mutables;  // its params and its nested blocks locals that were not captured but were modified by Set actions
 	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(Loop);
+	DECLARE_DOM_CLASS(MkLambda);
 };
 
-struct Local: Block {
-	own<DataDef> var;
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(Local);
+struct Function : MkLambda {  // Cannot be in the tree of ops. Resides in Ast::functions.
+	own<dom::Name> name;
+	own<Action> type_expression;
+	bool is_platform;
+	DECLARE_DOM_CLASS(Function);
 };
 
-struct Break: Action {
-	weak<Block> to_break;
-	own<Action> result;
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(Break);
+struct Method : Function {  // Cannot be in the tree of ops. Resides in TpClass::new_methods/overloads.
+	weak<Method> ovr;  // direct method that was overridden by this one
+	weak<Method> base; // first original class/interface method that was implemented by this one
+	weak<TpClass> cls;  // class in which this method is declared.
+	int ordinal; // index int cls->new_methods.
+	DECLARE_DOM_CLASS(Method);
 };
 
-struct ConstInt64: Action {
-	int64_t value;
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(ConstInt64);
-};
-
-struct ConstBool: Action {
-	bool value;
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(ConstBool);
-};
-
-struct ConstDouble: Action {
-	double value;
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(ConstDouble);
-};
-
-struct ConstAtom: Action {
-	own<Name> value;
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(ConstAtom);
-};
-
-struct BinaryOp: Action {
-	own<Action> p[2];
-};
-struct If: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(If);
-};
-struct Else: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(Else);
-};
-struct AddOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(AddOp);
-};
-struct SubOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(SubOp);
-};
-struct MulOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(MulOp);
-};
-struct DivOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(DivOp);
-};
-struct ModOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(ModOp);
-};
-struct ShlOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(ShlOp);
-};
-struct ShrOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(ShrOp);
-};
-struct AndOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(AndOp);
-};
-struct OrOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(OrOp);
-};
-struct XorOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(XorOp);
-};
-struct EqOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(EqOp);
-};
-struct LtOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(LtOp);
-};
-struct LogAndOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(LogAndOp);
-};
-struct LogOrOp: BinaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(LogOrOp);
-};
-
-struct UnaryOp: Action {
-	own<Action> p;
-};
-struct NotOp: UnaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(NotOp);
-};
-struct ToIntOp: UnaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(ToIntOp);
-};
-struct ToFloatOp: UnaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(ToFloatOp);
-};
-struct Own: UnaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(Own);
-};
-struct Weak: UnaryOp {
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(Weak);
-};
-
-struct DataRef: Action {
-	weak<DataDef> var;
-	own<Name> var_name;
-};
-
-struct GetVar: DataRef { // returns value type or pin(T)
-	// if var==null refs to this
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(GetVar);
-};
-
-struct SetVar: DataRef {
-	own<Action> value;
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(SetVar);
-};
-
-struct GetField: DataRef { // returns value type or pin(T).
-	own<Action> base; // if base==null, refs to this.
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(GetField);
-};
-
-struct SetField: DataRef {
-	own<Action> base;
-	own<Action> value;
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(SetField);
-};
-
-struct MakeInstance: Action {
-	weak<AbstractClassDef> cls;
-	own<Name> cls_name;
-	vector<own<MakeInstance>> params;
-	void match(ActionMatcher& matcher) override;
-	own<MakeInstance> shared() {
-		make_shared();
-		return this;
-	}
-	DECLARE_DOM_CLASS(MakeInstance);
-};
-
-struct Array: Action {
-	own<Action> size;
-	vector<own<Action>> initializers;
-	void match(ActionMatcher& matcher) override;
-	DECLARE_DOM_CLASS(Array);
-};
-
-struct Call: Action {
-	own<Action> receiver;
-	weak<MethodDef> method;
-	own<Name> method_name;
+struct Call : Action {
+	own<Action> callee;  // returns lambda
 	vector<own<Action>> params;
 	void match(ActionMatcher& matcher) override;
 	DECLARE_DOM_CLASS(Call);
 };
+struct GetAtIndex : Action {
+	own<Action> indexed;
+	vector<own<Action>> indexes;
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(GetAtIndex);
+};
+struct SetAtIndex : GetAtIndex {
+	own<Action> value;
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(SetAtIndex);
+};
+
+struct MakeDelegate : Action {
+	weak<Method> method;
+	own<Action> base;
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(MakeDelegate);
+};
+
+struct MakeFnPtr : Action {
+	weak<Function> fn;
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(MakeFnPtr);
+};
+
+struct DataRef : Action {
+	weak<Var> var;
+	own<dom::Name> var_name;
+	string get_annotation() override;
+};
+
+struct Get : DataRef {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(Get);
+};
+
+struct Set : DataRef {
+	own<Action> val;
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(Set);
+};
+
+struct FieldRef : Action {
+	own<Action> base;
+	weak<Field> field;
+	own<dom::Name> field_name;
+	string get_annotation() override;
+};
+
+struct GetField : FieldRef {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(GetField);
+};
+
+struct SetField : FieldRef {
+	own<Action> val;
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(SetField);
+};
+
+struct MkInstance : Action {
+	own<TpClass> cls;
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(MkInstance);
+};
+
+struct UnaryOp : Action {
+	own<Action> p;
+};
+struct BinaryOp : Action {
+	own<Action> p[2];
+};
+
+struct CastOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(CastOp);
+};
+struct AddOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(AddOp);
+};
+struct SubOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(SubOp);
+};
+struct MulOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(MulOp);
+};
+struct DivOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(DivOp);
+};
+struct ModOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(ModOp);
+};
+struct AndOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(AndOp);
+};
+struct OrOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(OrOp);
+};
+struct XorOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(XorOp);
+};
+struct ShlOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(ShlOp);
+};
+struct ShrOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(ShrOp);
+};
+struct EqOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(EqOp);
+};
+struct LtOp : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(LtOp);
+};
+struct If : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(If);
+};
+struct LAnd : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(LAnd);
+};
+struct Else : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(Else);
+};
+struct LOr : BinaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(LOr);
+};
+struct CopyOp : UnaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(CopyOp);
+};
+struct MkWeakOp : UnaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(MkWeakOp);
+};
+struct DerefWeakOp : UnaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(DerefWeakOp);
+};
+struct Loop : UnaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(Loop);
+};
+
+struct ToIntOp : UnaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(ToIntOp);
+};
+struct ToFloatOp : UnaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(ToFloatOp);
+};
+struct NotOp : UnaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(NotOp);
+};
+struct NegOp : UnaryOp {
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(NegOp);
+};
+struct RefOp : UnaryOp { // converts TpClass to TpRef, used only in type definitions.
+	void match(ActionMatcher& matcher) override;
+	DECLARE_DOM_CLASS(RefOp);
+};
+
 
 struct ActionMatcher {
 	virtual void on_unmatched(Action& node);
 	virtual void on_bin_op(BinaryOp& node);
 	virtual void on_un_op(UnaryOp& node);
 
-	virtual void on_block(Block& node);
-	virtual void on_loop(Loop& node);
-	virtual void on_local(Local& node);
-	virtual void on_break(Break& node);
 	virtual void on_const_i64(ConstInt64& node);
-	virtual void on_const_atom(ConstAtom& node);
 	virtual void on_const_double(ConstDouble& node);
+	virtual void on_const_void(ConstVoid& node);
 	virtual void on_const_bool(ConstBool& node);
-	virtual void on_if(If& node);
-	virtual void on_else(Else& node);
+	virtual void on_get(Get& node);
+	virtual void on_set(Set& node);
+	virtual void on_get_field(GetField& node);
+	virtual void on_set_field(SetField& node);
+	virtual void on_mk_instance(MkInstance& node);
+	virtual void on_mk_lambda(MkLambda& node);
+	virtual void on_call(Call& node);
+	virtual void on_get_at_index(GetAtIndex& node);
+	virtual void on_set_at_index(SetAtIndex& node);
+	virtual void on_make_delegate(MakeDelegate& node);
+	virtual void on_make_fn_ptr(MakeFnPtr& node);
+	virtual void on_block(Block& node);
+	virtual void on_cast(CastOp& node);
 	virtual void on_add(AddOp& node);
 	virtual void on_sub(SubOp& node);
 	virtual void on_mul(MulOp& node);
@@ -425,37 +471,37 @@ struct ActionMatcher {
 	virtual void on_shr(ShrOp& node);
 	virtual void on_eq(EqOp& node);
 	virtual void on_lt(LtOp& node);
-	virtual void on_log_and(LogAndOp& node);
-	virtual void on_log_or(LogOrOp& node);
-	virtual void on_not(NotOp& node);
+	virtual void on_if(If& node);
+	virtual void on_land(LAnd& node);
+	virtual void on_else(Else& node);
+	virtual void on_lor(LOr& node);
+	virtual void on_loop(Loop& node);
+	virtual void on_copy(CopyOp& node);
+	virtual void on_mk_weak(MkWeakOp& node);
+	virtual void on_deref_weak(DerefWeakOp& node);
+
 	virtual void on_to_int(ToIntOp& node);
 	virtual void on_to_float(ToFloatOp& node);
-	virtual void on_own(Own& node);
-	virtual void on_weak(Weak& node);
-	virtual void on_get_var(GetVar& node);
-	virtual void on_set_var(SetVar& node);
-	virtual void on_get_field(GetField& node);
-	virtual void on_set_field(SetField& node);
-	virtual void on_make_instance(MakeInstance& node);
-	virtual void on_array(Array& node);
-	virtual void on_call(Call& node);
+	virtual void on_not(NotOp& node);
+	virtual void on_neg(NegOp& node);
+	virtual void on_ref(RefOp& node);
+
+	own<Action>* fix_result = nullptr;
+	void fix(own<Action>& ptr);
 };
 
 struct ActionScanner : ActionMatcher {
-	own<Action>* fix_result = nullptr;
-	void fix(own<Action>& ptr);
 	void on_bin_op(BinaryOp& node) override;
 	void on_un_op(UnaryOp& node) override;
+	void on_mk_lambda(MkLambda& node) override;
+	void on_call(Call& node) override;
+	void on_get_at_index(GetAtIndex& node) override;
+	void on_set_at_index(SetAtIndex& node) override;
+	void on_make_delegate(MakeDelegate& node) override;
 	void on_block(Block& node) override;
-	void on_loop(Loop& node) override;
-	void on_local(Local& node) override;
-	void on_break(Break& node) override;
-	void on_set_var(SetVar& node) override;
+	void on_set(Set& node) override;
 	void on_get_field(GetField& node) override;
 	void on_set_field(SetField& node) override;
-	void on_make_instance(MakeInstance& node) override;
-	void on_array(Array& node) override;
-	void on_call(Call& node) override;
 };
 
 template<typename T>
@@ -463,11 +509,8 @@ pin<T> make_at_location(Node& src) {
 	auto r = pin<T>::make();
 	r->line = src.line;
 	r->pos = src.pos;
-	r->module = src.module;
 	return r;
 }
-
-inline class_key::class_key(const class_key& src) : holder(src.data.shared()), data(*holder) {}
 
 void initialize();
 
@@ -475,10 +518,10 @@ void initialize();
 
 namespace std {
 
-std::ostream& operator<< (std::ostream& dst, ast::Node* n);
-inline std::ostream& operator<< (std::ostream& dst, const ltm::pin<ast::Node>& n) { return dst << n.get(); }
+std::ostream& operator<< (std::ostream& dst, const ast::Node& n);
+inline std::ostream& operator<< (std::ostream& dst, const ltm::pin<ast::Node>& n) { return dst << *n; }
 
-std::ostream& operator<< (std::ostream& dst, const ltm::pin<ast::Type> t);
+std::ostream& operator<< (std::ostream& dst, const ltm::pin<ast::Type>& t);
 
 }
 

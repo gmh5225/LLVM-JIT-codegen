@@ -4,6 +4,9 @@
 #include <unordered_map>
 #include <sstream>
 #include <algorithm>
+#include <variant>
+#include <optional>
+#include <cfenv>
 #include "parser.h"
 
 namespace {
@@ -11,11 +14,14 @@ namespace {
 using std::string;
 using std::unordered_map;
 using std::vector;
+using std::variant;
+using std::optional;
+using std::nullopt;
+using std::get_if; 
 using ltm::weak;
 using ltm::own;
 using ltm::pin;
 using dom::Name;
-using ast::Module;
 using ast::Ast;
 using ast::Node;
 using ast::Action;
@@ -36,215 +42,201 @@ struct Parser {
 	pin<Ast> ast;
 	string text;
 	pin<Name> module_name;
-	int line = 0, pos = 0;
+	int line = 1, pos = 1;
 	const char* cur = nullptr;
-	pin<Module> module;
-	pin<ast::Block> block_for_return_statement;
-	pin<ast::Block> block_for_break_statement;
-	pin<ast::Block> block_for_continue_statement;
 
 	Parser(pin<Ast> ast, pin<Name> module_name)
-		: dom(ast::static_dom)
+		: dom(ast->dom)
 		, ast(ast)
 		, module_name(module_name)
 	{}
 
-	pin<Module> parse(
-		vector<pin<Name>>& active_modules,
-		module_text_provider_t module_text_provider)
+	void parse_fn_def(pin<ast::Function> fn) {
+		if (match("(")) {
+			while (!match(")")) {
+				auto param = make<ast::Var>();
+				fn->names.push_back(param);
+				param->initializer = parse_type();
+				param->name = ast->dom->names()->get(expect_id("parameter name"));
+				if (match(")"))
+					break;
+				expect(",");
+			}
+		}
+		if (match(";")) {
+			fn->type_expression = make<ast::ConstVoid>();
+			fn->is_platform = true;
+			return;
+		}
+		if (match("{")) {
+			fn->type_expression = make<ast::ConstVoid>();
+		} else {
+			fn->type_expression = parse_type();
+			if (match(";")) {
+				fn->is_platform = true;
+				return;
+			}
+			expect("{");
+		}
+		parse_statement_sequence(fn->body);
+		expect("}");
+	}
+
+	pin<ast::Method> make_method(pin<dom::Name> name, pin<ast::TpClass> cls, bool is_interface) {
+		auto method = make<ast::Method>();
+		method->name = name;
+		auto this_param = make<ast::Var>();
+		method->names.push_back(this_param);
+		this_param->name = ast->dom->names()->get("this");
+		auto this_init = make<ast::MkInstance>();
+		this_init->cls = cls;
+		this_param->initializer = this_init;
+		parse_fn_def(method);
+		if (is_interface != method->body.empty()) {
+			error(is_interface ? "empty" : "not empty", " body expected");
+		}
+		return method;
+	}
+
+	void parse(module_text_provider_t module_text_provider)
 	{
-		module = new Module();
-		dom->set_name(module, module_name);
-		module->name = module_name;
-		active_modules.push_back(module_name);
-		auto guard = mk_guard([&]{ active_modules.pop_back(); });
 		text = module_text_provider(module_name);
 		cur = text.c_str();
 		match_ws();
-		expect("module");
-		if (expect_domain_name(dom->names(), "module name") != module_name) {
-			error("module name mismatch file path");
-		}
-		expect(".");
-		module->version = expect_number("module version");
-		if (match("{")) {
-			do {
-				auto import_name = expect_domain_name(dom->names(), "import name");
-				expect(".");
-				auto import_version = expect_number("import version");
-				for (auto i = active_modules.begin(); i != active_modules.end(); ++i) {
-					if (*i == import_name) {
-						std::stringstream message;
-						message << "curcular dependencies at module " << import_name << std::endl << "path:";
-						for (; i != active_modules.end(); ++i)
-							message << *i << std::endl;
-						error(message.str());
-					}
-				}
-				auto module = dom::strict_cast<Module>(dom->get_named(import_name));
-				if (!module) {
-					module = Parser(ast, import_name).parse(active_modules, module_text_provider);
-				}
-				if (module->version < import_version)
-					error("outdated module version:" + std::to_string(module->version));
-			} while (match(","));
-			expect("}");
-		}
-		while (!is_eof()) {
-			auto cls = make<ast::ClassDef>();
-			cls->is_interface = match("interface");
-			if (!cls->is_interface)
-				expect("class");
-			auto class_name = module_name->get(expect_id("class"));
-			dom->set_name(cls, class_name);
-			module->classes.push_back(cls);
-			if (match("(")) {
-				do {
-					auto param = make<ast::ClassParamDef>();
-					cls->type_params.push_back(param);
-					param->name = module_name->get(expect_id("type parameter"));
-					if (match(":"))
-						param->bound_name = expect_domain_name(module_name, "class parameter base");
-					else
-						param->bound = ast->get_ast_object()->cls.cast<ast::ClassDef>();
-				} while(match(","));
-				expect(")");
-			}
-			if (match(":")) {
-				do
-					cls->bases.push_back(parse_class_ref("expected base class name"));
-				while (match(","));
-			}
-			expect("{");
-			while (!match("}")) {
-				if (match("+")) {
-					auto method = make<ast::MethodDef>();
-					cls->methods.push_back(method);
-					method->name = module_name->get(expect_id("method"));
-					if (match("(") && !match(")")) {
-						do {
-							auto param = make<ast::DataDef>();
-							method->params.push_back(param);
-							auto name = expect_id("parameter");
-							param->name = dom->names()->get(name);
-							expect(":");
-							param->initializer = parse_expression();
-						} while (match(","));
-						expect(")");
-					}
-					method->body = parse_statement(&block_for_return_statement);
-				} else {
-					auto id = expect_id("field or override name");
-					if (match("=")) {
-						if (cls->is_interface)
-							error("intrerface can't have fields");
-						auto field = make<ast::DataDef>();
-						cls->fields.push_back(field);
-						field->name = module_name->get(id);
-						field->initializer = parse_expression();
-						expect(";");
+		for (;;) {
+			bool is_interface = match("interface");
+			if (is_interface || match("class")) {
+				auto cls = ast->get_class(expect_domain_name("class or interface name"));
+				cls->is_interface = is_interface;
+				expect("{");
+				while (!match("}")) {
+					if (match("+")) {
+						auto& base_content = cls->overloads[ast->get_class(expect_domain_name("base class or interface"))];
+						if (match("{")) {
+							if (is_interface)
+								error("interface can't have overrides");
+							while (!match("}"))
+								base_content.push_back(make_method(expect_domain_name("override method name"), cls, is_interface));
+						} else {
+							expect(";");
+						}
 					} else {
-						auto ovr = make<ast::OverrideDef>();
-						ovr->method_name = match_domain_name_tail(id, "override name");
-						if (!ovr->method_name)
-							ovr->method_name = dom->names()->get(id);
-						if (match("."))
-							ovr->atom = expect_domain_name(dom->names(), "selector");
-						ovr->body = parse_statement(&block_for_return_statement);
+						auto member_name = expect_domain_name("method or field name");
+						if (match("=")) {
+							cls->fields.push_back(make<ast::Field>());
+							cls->fields.back()->name = member_name;
+							cls->fields.back()->initializer = parse_expression();
+							expect(";");
+						} else {
+							cls->new_methods.push_back(make_method(member_name, cls, is_interface));
+						}
 					}
 				}
+			} else if (match("fn")) {
+				auto fn = make<ast::Function>();
+				fn->name = expect_domain_name("function name");
+				auto& fn_ref = ast->functions_by_names[fn->name];
+				if (fn_ref)
+					error("duplicated function name, see", fn_ref.pinned());
+				fn_ref = fn;
+				ast->functions.push_back(fn);
+				parse_fn_def(fn);
+			} else {
+				break;
 			}
 		}
-		ast->modules.push_back(module);
-		return module;
+		ast->entry_point = make<ast::Function>();
+		parse_statement_sequence(ast->entry_point->body);
+		if (*cur)
+			error("unexpected statements");
 	}
 
-	pin<ast::MakeInstance> parse_class_ref(string message) {
-		auto r = make<ast::MakeInstance>();
-		r->cls_name = expect_domain_name(module_name, message.c_str());
-		if (match("(")) {
-			while(!match(")"))
-				r->params.push_back(parse_class_ref(message + " parameter"));
+	void parse_statement_sequence(vector<own<Action>>& body) {
+		do {
+			if (*cur == '}') {
+				body.push_back(make<ast::ConstVoid>());
+				break;
+			}
+			body.push_back(parse_statement());
+		} while (match(";"));
+	}
+
+	pin<Action> parse_type() {
+		if (match("~"))
+			return parse_type();
+		if (match("int"))
+			return mk_const<ast::ConstInt64>(0);
+		if (match("double"))
+			return mk_const<ast::ConstDouble>(0.0);
+		if (match("bool"))
+			return make<ast::ConstBool>();
+		if (match("void"))
+			return make<ast::ConstVoid>();
+		if (match("?")) {
+			auto r = make<ast::If>();
+			r->p[0] = make<ast::ConstBool>();
+			r->p[1] = parse_type();
+			return r;
+		}
+		if (match("&")) {
+			auto r = make<ast::MkWeakOp>();
+			auto get = make<ast::Get>();
+			get->var_name = expect_domain_name("class or interface name");
+			r->p = get;
+			return r;
+		}
+		if (match("@")) {
+			auto get = make<ast::Get>();
+			get->var_name = expect_domain_name("class or interface name");
+			return get;
+		}
+		auto parse_params = [&](pin<ast::MkLambda> fn) {
+			if (!match(")")) {
+				for (;;) {
+					fn->names.push_back(make<ast::Var>());
+					fn->names.back()->initializer = parse_type();
+					if (match(")"))
+						break;
+					expect(",");
+				}
+			}
+			fn->body.push_back(parse_type());
+			return fn;
+		};
+		if (match("fn")) {
+			expect("(");
+			return parse_params(make<ast::Function>());
+		}
+		if (match("("))
+			return parse_params(make<ast::MkLambda>());
+		if (auto name = match_domain_name("class or interface name")) {
+			auto r = make<ast::RefOp>();
+			auto get = make<ast::Get>();
+			get->var_name = *name;
+			r->p = get;
+			return r;
+		}
+		// TODO &(T,T)T - delegate
+		error("Expected type name");
+	}
+
+	pin<Action> parse_statement() {
+		auto r = parse_expression();
+		if (auto as_get = dom::strict_cast<ast::Get>(r)) {
+			if (!as_get->var && match("=")) {
+				if (as_get->var_name->domain != ast->dom->names())
+					error("local var names should not contain '_'");
+				auto block = make<ast::Block>();
+				auto var = make_at_location<ast::Var>(*r);
+				var->name = as_get->var_name;
+				var->initializer = parse_expression();
+				block->names.push_back(var);
+				expect(";");
+				parse_statement_sequence(block->body);
+				return block;
+			}
 		}
 		return r;
-	}
-
-	pin<ast::Action> parse_statement(pin<ast::Block>* special_block = nullptr, bool in_block = false) {
-		if (match("{")) {
-			auto r = make<ast::Block>();
-			auto prev = *special_block;
-			if (special_block)
-				*special_block = r;
-			while (!match("}"))
-				r->body.push_back(parse_statement(nullptr, true));
-			*special_block = prev;
-			return r;
-		}
-		if (match("if")) {
-			auto condition = parse_expression();
-			auto r = fill(make<ast::If>(), condition, parse_statement());
-			if (match("else"))
-				return fill(make<ast::Else>(), r, parse_statement());
-			return r;
-		}
-		if (match("while")) {
-			auto cond = parse_expression();
-			auto r = make<ast::Loop>();
-			auto brk = make<ast::Break>();
-			auto prev = block_for_break_statement;
-			block_for_break_statement = r;
-			r->body.push_back(
-				fill(make<ast::Else>(),
-					fill(make<ast::If>(), cond, parse_statement(&block_for_continue_statement)),
-					brk));
-			brk->to_break = r;
-			block_for_break_statement = prev;
-			return r;
-		}
-		if (match("return")) {
-			auto r = make<ast::Break>();
-			r->to_break = block_for_return_statement;
-			if (!match(";")) {
-				r->result = parse_expression();
-				expect(";");
-			}
-			return r;
-		}
-		if (match("break")) {
-			if (!block_for_break_statement)
-				error("break outlide of loop");
-			auto r = make<ast::Break>();
-			r->to_break = block_for_break_statement;
-			expect(";");
-			return r;
-		}
-		if (match("continue")) {
-			if (!block_for_break_statement)
-				error("continue outlide of loop with {body}");
-			auto r = make<ast::Break>();
-			r->to_break = block_for_continue_statement;
-			expect(";");
-			return r;
-		}
-		// todo: if a=expr action
-		// todo: :label for... break:label expression
-		auto lead = parse_expression();
-		auto lead_as_id = dom::strict_cast<ast::GetVar>(lead);
-		if (lead_as_id && match_a_and_not_b('=', '=')) {
-			if (in_block)
-				error("local cannot be declared outside {block}");
-			auto local = make<ast::Local>();
-			auto var = make<ast::DataDef>();
-			local->var = var;
-			var->name = lead_as_id->var_name;
-			var->initializer = parse_expression();
-			expect(";");
-			while (!peek('}'))
-				local->body.push_back(parse_statement());
-			return local;
-		}
-		expect(";");
-		return lead;
 	}
 
 	pin<Action> parse_expression() {
@@ -253,157 +245,224 @@ struct Parser {
 
 	pin<Action> parse_elses() {
 		auto r = parse_ifs();
-		return match("\\") ? fill(make<ast::Else>(), r, parse_elses()) : r;
+		for (;;) {
+			if (match(":"))
+				r = fill(make<ast::Else>(), r, parse_ifs());
+			else if (match("||"))
+				r = fill(make<ast::LOr>(), r, parse_ifs());
+			else
+				break;
+		}
+		return r;
 	}
 
 	pin<Action> parse_ifs() {
-		auto r = parse_ors();
-		return match("?") ? fill(make<ast::If>(), r, parse_elses()) : r;
-	}
-
-	pin<Action> parse_ors() {
-		auto r = parse_ands();
-		while (match("||")) {
-			r = fill(make<ast::LogOrOp>(), r, parse_ands());
+		auto r = parse_cond();
+		bool is_and = match_ns("&&");
+		if (is_and || match_ns("?")) {
+			pin<ast::BinaryOp> iff;
+			if (is_and)
+				iff = make<ast::LAnd>();
+			else
+				iff = make<ast::If>();
+			auto rhs = make<ast::Block>();
+			rhs->names.push_back(make<ast::Var>());
+			if (auto maybe_id = match_id()) {
+				rhs->names.back()->name = ast->dom->names()->get(*maybe_id);
+			} else {
+				rhs->names.back()->name = ast->dom->names()->get("_");
+				match_ws();
+			}
+			rhs->body.push_back(parse_ifs());
+			r = fill(iff, r, rhs);
 		}
 		return r;
 	}
 
-	pin<Action> parse_ands() {
-		auto r = parse_comparisons();
-		while (match("&&")) {
-			r = fill(make<ast::LogAndOp>(), r, parse_comparisons());
-		}
-		return r;
-	}
-
-	pin<Action> parse_comparisons() {
+	pin<Action> parse_cond() {
 		auto r = parse_adds();
-		if (match("==")) {
-			r = fill(make<ast::EqOp>(), r, parse_adds());
-		} else if (match("!=")) {
-			r = fill(make<ast::NotOp>(), fill(make<ast::EqOp>(), r, parse_adds()));
-		} else if (match("<=")) {
-			r = fill(make<ast::NotOp>(), fill(make<ast::LtOp>(), parse_adds(), r));
-		} else if (match(">=")) {
-			r = fill(make<ast::NotOp>(), fill(make<ast::LtOp>(), r, parse_adds()));
-		} else if (match("<")) {
-			r = fill(make<ast::LtOp>(), r, parse_adds());
-		} else if (match(">")) {
-			r = fill(make<ast::LtOp>(), parse_adds(), r);
-		}
+		if (match("==")) return fill(make<ast::EqOp>(), r, parse_adds());
+		if (match("<")) return fill(make<ast::LtOp>(), r, parse_adds());
+		if (match(">")) return fill(make<ast::LtOp>(), parse_adds(), r);
+		if (match("!=")) return fill(make<ast::NotOp>(), fill(make<ast::EqOp>(), r, parse_adds()));
+		if (match(">=")) return fill(make<ast::NotOp>(), fill(make<ast::LtOp>(), r, parse_adds()));
+		if (match("<=")) return fill(make<ast::NotOp>(), fill(make<ast::LtOp>(), parse_adds(), r));
 		return r;
 	}
 
 	pin<Action> parse_adds() {
 		auto r = parse_muls();
 		for (;;) {
-			if (match("+")) {
-				r = fill(make<ast::AddOp>(), r, parse_muls());
-			} else if (match("-")) {
-				r = fill(make<ast::SubOp>(), r, parse_muls());
-			} else {
-				break;
-			}
+			if (match("+")) r = fill(make<ast::AddOp>(), r, parse_muls());
+			else if (match("-")) r = fill(make<ast::SubOp>(), r, parse_muls());
+			else break;
 		}
 		return r;
 	}
 
 	pin<Action> parse_muls() {
-		auto r = parse_un();
+		auto r = parse_unar();
 		for (;;) {
-			if (match("*")) {
-				r = fill(make<ast::MulOp>(), r, parse_un());
-			} else if (match("/")) {
-				r = fill(make<ast::DivOp>(), r, parse_un());
-			} else if (match("%")) {
-				r = fill(make<ast::ModOp>(), r, parse_un());
-			} else if (match("<<")) {
-				r = fill(make<ast::ShlOp>(), r, parse_un());
-			} else if (match("^")) {
-				r = fill(make<ast::XorOp>(), r, parse_un());
-			} else if (match(">>")) {
-				r = fill(make<ast::ShrOp>(), r, parse_un());
-			} else if (match_a_and_not_b('&', '&')) {
-				r = fill(make<ast::AndOp>(), r, parse_un());
-			} else if (match_a_and_not_b('|', '|')) {
-				r = fill(make<ast::OrOp>(), r, parse_un());
-			} else {
-				break;
-			}
+			if (match("*")) r = fill(make<ast::MulOp>(), r, parse_unar());
+			else if (match("/")) r = fill(make<ast::DivOp>(), r, parse_unar());
+			else if (match("%")) r = fill(make<ast::ModOp>(), r, parse_unar());
+			else if (match("<<")) r = fill(make<ast::ShlOp>(), r, parse_unar());
+			else if (match(">>")) r = fill(make<ast::ShrOp>(), r, parse_unar());
+			else if (match_and_not("&", '&')) r = fill(make<ast::AndOp>(), r, parse_unar());
+			else if (match_and_not("|", '|')) r = fill(make<ast::OrOp>(), r, parse_unar());
+			else if (match("^")) r = fill(make<ast::XorOp>(), r, parse_unar());
+			else break;
 		}
 		return r;
 	}
 
-	pin<Action> parse_un() {
-		auto r = parse_un_head();
+	pin<Action> parse_expression_in_parethesis() {
+		expect("(");
+		auto r = parse_expression();
+		expect(")");
+		return r;
+	}
+	pin<Action> parse_unar() {
+		auto r = parse_unar_head();
 		for (;;) {
-			auto n = parse_un_tail(r);
-			if (n)
-				r = n;
-			else
+			if (match("(")) {
+				auto call = make<ast::Call>();
+				call->callee = r;
+				r = call;
+				while (!match(")")) {
+					call->params.push_back(parse_expression());
+					if (match(")"))
+						break;
+					expect(",");
+				}
+			} else if (match("[")) {
+				auto gi = make<ast::GetAtIndex>();
+				do
+					gi->indexes.push_back(parse_expression());
+				while (match(","));
+				expect("]");
+				if (match(":=")) {
+					auto si = make_at_location<ast::SetAtIndex>(*gi);
+					si->indexes = move(gi->indexes);
+					si->value = parse_expression();
+					gi = si;
+				}
+				gi->indexed = r;
+				r = gi;
+			} else if (match(".")) {
+				pin<ast::FieldRef> gf = make<ast::GetField>();
+				gf->field_name = expect_domain_name("field name");
+				if (match(":=")) {
+					auto sf = make_at_location<ast::SetField>(*gf);
+					sf->field_name = gf->field_name;
+					sf->val = parse_expression();
+					gf = sf;
+				}
+				gf->base = r;
+				r = gf;
+			} else if (match(":=")) {
+				if (auto as_get = dom::strict_cast<ast::Get>(r)) {
+					auto set = make<ast::Set>();
+					set->var = as_get->var;
+					set->var_name = as_get->var_name;
+					set->val = parse_expression();
+					r = set;
+				} else {
+					error("expected variable name in front of := operator");
+				}
+			} else if (match("~")) {
+				r = fill(make<ast::CastOp>(), r, parse_unar_head());
+			} else
 				return r;
 		}
 	}
-
-	// b ; own and pin to pin, weak and opt own and opt pin to optional pin
-	// *b ; all to optional weak (weak is always optional)
-	// @b ; pin and own - copy to temp own, temp own - move, optional(C) - src?*_
-	// copy(C) as *C but temp own gets copied
-	// only temp_own can be assigned to own. so use (a := *b) or (a := copy(b))
-	pin<Action> parse_un_head() {
-		uint64_t num;
-		string name;
+	pin<Action> parse_unar_head() {
 		if (match("(")) {
-			auto r = parse_expression();
-			expect(")");
-			return r;
-		} else if (match("-")) {
-			return fill(make<ast::MulOp>(), parse_un(), mk_const<ast::ConstInt64>(-1));
-		} else if (match("~")) {
-			return fill(make<ast::XorOp>(), parse_un(), mk_const<ast::ConstInt64>(-1));
-		} else if (match("!")) {
-			return fill(make<ast::NotOp>(), parse_un());
-		} else if (match_num(num)) {
-			return mk_const<ast::ConstInt64>(num);
-		} else if (match_ns(".")) {
-			return mk_const<ast::ConstAtom>(expect_domain_name(dom->names(), "atom"));
-		} else if (match_id(name)) {
-			if (auto domain_name = match_domain_name_tail(name, "name")) {
-				auto r = make<ast::GetVar>();
-				r->var_name = domain_name;
-				return r;
+			pin<Action> start_expr;
+			auto lambda = make<ast::MkLambda>();
+			if (!match(")")) {
+				start_expr = parse_expression();
+				while (!match(")")) {
+					expect(",");
+					lambda->names.push_back(make<ast::Var>());
+					lambda->names.back()->name = ast->dom->names()->get(expect_id("parameter"));
+				}
 			}
-			if (name == "true")
-				return mk_const<ast::ConstBool>(true);
-			if (name == "false")
-				return mk_const<ast::ConstBool>(false);
-			if (name == "this")
-				return make<ast::GetVar>();  // var = var_name = null
-			auto r = make<ast::GetVar>();
-			r->var_name = dom->names()->get(name);
-			return r;
-		} else if (match("*")) {
-			return fill(make<ast::Weak>(), parse_un());
-		} else if (match("@")) {
-			return fill(make<ast::Own>(), parse_un());
-		} else if (match("{")) {
+			if (match("{")) {
+				if (start_expr) {
+					if (auto as_ref = dom::strict_cast<ast::Get>(start_expr)) {
+						lambda->names.insert(lambda->names.begin(), make<ast::Var>());
+						lambda->names.front()->name = as_ref->var_name;
+					} else {
+						start_expr->error("lambda definition requires parameter name");
+					}
+				}
+				parse_statement_sequence(lambda->body);
+				expect("}");
+				return lambda;
+			} else if (lambda->names.empty() && start_expr){
+				return start_expr;
+			}
+			lambda->error("expected single expression in parentesis or lambda {body}");
+		}
+		if (match("@"))
+			return fill(make<ast::CopyOp>(), parse_unar());
+		if (match("&"))
+			return fill(make<ast::MkWeakOp>(), parse_unar());
+		if (match("!"))
+			return fill(make<ast::NotOp>(), parse_unar());
+		if (match("-"))
+			return fill(make<ast::NegOp>(), parse_unar());
+		if (match("~"))
+			return fill(make<ast::MulOp>(),
+				parse_unar(),
+				mk_const<ast::ConstInt64>(-1));
+		if (auto n = match_num()) {
+			if (auto v = get_if<uint64_t>(&*n))
+				return mk_const<ast::ConstInt64>(*v);
+			if (auto v = get_if<double>(&*n))
+				return mk_const<ast::ConstDouble>(*v);
+		}
+		if (match("{")) {
 			auto r = make<ast::Block>();
-			while (!match("}"))
-				r->body.push_back(parse_statement());
-			return r;
-		} else if (match("[")) {
-			auto r = make<ast::Array>();
-			do 
-				r->initializers.push_back(parse_expression());
-			while (match(","));
-			expect("]");
-			if (match("*"))
-				r->size = parse_un();
+			parse_statement_sequence(r->body);
+			expect("}");
 			return r;
 		}
-		error("expected expression");
-		return nullptr;
+		bool matched_true = match("+");
+		if (matched_true || match("?")) {
+			auto r = make<ast::If>();
+			auto cond = make<ast::ConstBool>();
+			cond->value = matched_true;
+			r->p[0] = cond;
+			r->p[1] = parse_unar();
+			return r;
+		}
+		matched_true = match("true");
+		if (matched_true || match("false")) {
+			auto r = make<ast::ConstBool>();
+			r->value = matched_true;
+			return r;
+		}
+		if (match("void"))
+			return make<ast::ConstVoid>();
+		if (match("int"))
+			return fill(make<ast::ToIntOp>(), parse_expression_in_parethesis());
+		if (match("double"))
+			return fill(make<ast::ToFloatOp>(), parse_expression_in_parethesis());
+		if (match("loop")) 
+			return fill(make<ast::Loop>(), parse_unar());
+		if (auto name = match("_")) {
+			auto r = make<ast::Get>();
+			r->var_name = ast->dom->names()->get("_");
+			return r;
+		}
+		if (auto name = match_domain_name("domain name")) {
+			auto r = make<ast::Get>();
+			r->var_name = *name;
+			return r;
+		}
+		error("syntax error");
 	}
 
 	template<typename T, typename VT>
@@ -412,133 +471,13 @@ struct Parser {
 		r->value = v;
 		return r;
 	}
-	pin<Action> parse_un_tail(pin<Action> head) {
-		if (match("(")) {
-			if (auto as_get_var = dom::strict_cast<ast::GetVar>(head)) {
-				// this can be class_name(type params) or this_method_name(call params)
-				auto r = pin<ast::Call>();
-				r->method_name = as_get_var->var_name;
-				if (!match(")")) {
-					do
-						r->params.push_back(parse_expression());
-					while (match(","));
-					expect(")");
-				}
-				return r;
-			} else
-				error("expect method name or class to instantiate");
-		} else if (match("[")) {
-			auto r = make<ast::Call>();
-			r->receiver = head;
-			do
-				r->params.push_back(parse_expression());
-			while (match(","));
-			expect("]");
-			if (match(":=")) { // TODO: { _=base; _#=param#; b[i] _[_#]:= _b[_#] op x; }
-				r->method_name = dom->names()->get("set_at");
-				r->params.push_back(parse_expression());
-			} else {
-				r->method_name = dom->names()->get("get_at");
-			}
-			return r;
-		} else if (match(".")) {
-			auto field_name = expect_domain_name(dom->names(), "field");
-			if (match("(")) {
-				auto r = pin<ast::Call>();
-				r->receiver = head;
-				r->method_name = field_name;
-				if (!match(")")) {
-					do
-						r->params.push_back(parse_expression());
-					while (match(","));
-					expect(")");
-				}
-				return r;
-			} else if (match(":=")) {
-				auto r = make<ast::SetField>();
-				r->base = head;
-				r->var_name = field_name;
-				r->value = parse_expression();
-				return r;
-			} else if (auto op = match_bin_op()) {  // {_=base; _.f :=_.f op x;}
-				auto local = make<ast::Local>();
-				auto var = make<ast::DataDef>();
-				local->var = var;
-				var->name = dom->names()->get("_");
-				var->initializer = head;
-				auto setter = make<ast::SetField>();
-				setter->var_name = field_name;
-				setter->base = make<ast::GetVar>();
-				setter->base.cast<ast::GetVar>()->var = var;
-				setter->value = op;
-				op = setter->value.cast<ast::BinaryOp>();
-				auto getter = make<ast::GetField>();
-				getter->base = make<ast::GetVar>();
-				getter->base.cast<ast::GetVar>()->var = var;
-				getter->var_name = field_name;
-				op->p[0] = getter;
-				op->p[1] = parse_expression();
-				local->body.push_back(setter);
-				return local;
-			} else {
-				auto r = make<ast::GetField>();
-				r->base = head;
-				r->var_name = field_name;
-				return r;
-			}
-		} else if (match(":=")) {
-			if (auto as_get_var = dom::strict_cast<ast::GetVar>(head)) {
-				auto r = make<ast::SetVar>();
-				r->var_name = as_get_var->var_name;
-				r->var = as_get_var->var;
-				r->value = parse_expression();
-				return r;
-			} else
-				error("only variable can be assigned");
-		} else if (auto op = match_bin_op()) {
-			if (auto as_get_var = dom::strict_cast<ast::GetVar>(head)) {
-				auto setter = make<ast::SetVar>();
-				setter->var_name = as_get_var->var_name;
-				setter->var = as_get_var->var;
-				setter->value = op;
-				fill(setter->value.cast<ast::BinaryOp>(), head, parse_expression());
-				return setter;
-			} else
-				error("only variable can be modified");
-		}
-		return nullptr;
-	}
-
-	pin<ast::BinaryOp> match_bin_op() {
-		if (match("+="))
-			return make<ast::AddOp>();
-		if (match("-="))
-			return make<ast::SubOp>();
-		if (match("*="))
-			return make<ast::MulOp>();
-		if (match("/="))
-			return make<ast::DivOp>();
-		if (match("%="))
-			return make<ast::ModOp>();
-		if (match("|="))
-			return make<ast::OrOp>();
-		if (match("&="))
-			return make<ast::AndOp>();
-		if (match("^="))
-			return make<ast::XorOp>();
-		if (match("<<="))
-			return make<ast::ShlOp>();
-		if (match(">>="))
-			return make<ast::ShrOp>();
-		return nullptr;
-	}
 
 	template<typename T>
 	pin<T> make() {
 		auto r = pin<T>::make();
 		r->line = line;
 		r->pos = pos;
-		r->module = module;
+		// r->module = module;
 		return r;
 	}
 
@@ -553,41 +492,46 @@ struct Parser {
 		return op;
 	}
 
-	pin<Name> match_domain_name_tail(string id, const char* message) {
-		if (!match("_"))
-			return nullptr;
-		pin<Name> r = dom->names()->get(id)->get(expect_id(message));
-		while (match("_")){
-			string name_val = expect_id(message);
-			r = r->get(name_val);
+	optional<string> match_id() {
+		if (!is_id_head(*cur))
+			return nullopt;
+		string result;
+		while (is_id_body(*cur)) {
+			result += *cur++;
+			++pos;
 		}
-		return r;
+		match_ws();
+		return result;
 	}
 
-	pin<Name> expect_domain_name(pin<Name> default_domain, const char* message) {
-		auto id = expect_id(message);
-		auto name = match_domain_name_tail(id, message);
-		return name ? name : default_domain->get(id);
+	string expect_id(const char* message) {
+		if (auto r = match_id())
+			return *r;
+		error("expected ", message);
 	}
 
-	uint64_t expect_number(const char* message) {
-		uint64_t r = 0;
-		if (!match_num(r))
-			error("expected number");
-		return r;
-	}
-	void expect(char* str) {
-		if (!match(str))
-			error(string("expected '") + str + "'");
+	variant<uint64_t, double> expect_number() {
+		if (auto n = match_num()) {
+			if (auto v = get_if<uint64_t>(&*n))
+				return *v;
+			if (auto v = get_if<double>(&*n))
+				return *v;
+		}
+		error("expected number");
 	}
 
-	bool match_ns(char* str) {
+	int match_length(char* str) { // returns 0 if not matched, length to skip if matched
 		int i = 0;
 		for (; str[i]; i++) {
 			if (str[i] != cur[i])
-				return false;
+				return 0;
 		}
-		if (is_alpha_num(str[i - 1]) && is_alpha_num(cur[i]))
+		return i;
+	}
+
+	bool match_ns(char* str) {
+		int i = match_length(str);
+		if (i == 0 || (is_id_body(str[i - 1]) && is_id_body(cur[i])))
 			return false;
 		cur += i;
 		pos += i;
@@ -602,21 +546,26 @@ struct Parser {
 		return false;
 	}
 
-	bool peek(char c) { return *cur == c; }
-
-	bool match_a_and_not_b(char a, char b) {
-		if (*cur == a && cur[1] != b) {
-			cur++;
-			pos++;
-			match_ws();
-			return true;
+	bool match_and_not(char* str, char after) {
+		if (int i = match_length(str)) {
+			if (cur[i] != after) {
+				cur += i;
+				pos += i;
+				match_ws();
+				return true;
+			}
 		}
 		return false;
 	}
 
+	void expect(char* str) {
+		if (!match(str))
+			error(string("expected '") + str + "'");
+	}
+
 	bool match_ws() {
 		const char* c = cur;
-		for (;; line++, pos = 0) {
+		for (;; line++, pos = 1) {
 			while (*cur == ' ') {
 				++cur;
 				++pos;
@@ -642,7 +591,7 @@ struct Parser {
 		}
 	}
 
-	static bool is_alpha(char c) {
+	static bool is_id_head(char c) {
 		return
 			(c >= 'a' && c <= 'z') ||
 			(c >= 'A' && c <= 'Z');
@@ -650,6 +599,10 @@ struct Parser {
 
 	static bool is_num(char c) {
 		return c >= '0' && c <= '9';
+	};
+
+	static bool is_id_body(char c) {
+		return is_id_head(c) || is_num(c);
 	};
 
 	static int get_digit(char c) {
@@ -662,44 +615,22 @@ struct Parser {
 		return 255;
 	}
 
-	static bool is_alpha_num(char c) {
-		return is_alpha(c) || is_num(c);
-	};
-
-	bool match_id(string& result, bool* out_is_private = nullptr) {
-		if (!is_alpha(*cur))
-			return false;
-		while (is_alpha_num(*cur) || (*cur == '_' && !is_alpha_num(cur[1]))) {
-			result += *cur++;
-			++pos;
-		}
-		match_ws();
-		return true;
-	}
-
-	string expect_id(const char* message) {
-		string r;
-		if (!match_id(r)) {
-			error(string("expected") + message);
-		}
-		return r;
-	}
-
-	bool match_num(uint64_t& result) {
+	optional<variant<uint64_t, double>> match_num() {
 		if (!is_num(*cur))
-			return false;
+			return nullopt;
 		int radix = 10;
-		if (*cur == '0') {
-			cur++;
+		if (match_ns("0")) {
 			switch (*cur) {
 			case 'x': radix = 16; break;
 			case 'o': radix = 8; break;
 			case 'b': radix = 2; break;
-			default: cur--; break;
+			default:
+				cur-=2;
+				break;
 			}
 			cur++;
 		}
-		result = 0;
+		uint64_t result = 0;
 		for (;; cur++, pos++) {
 			if (*cur == '_')
 				continue;
@@ -713,17 +644,57 @@ struct Parser {
 				error("overflow");
 			result = next;
 		}
+		if (*cur != '.' && *cur != 'e' && *cur != 'E') {
+			match_ws();
+			return result;
+		}
+		std::feclearexcept(FE_ALL_EXCEPT);
+		double d = double(result);
+		if (match_ns(".")) {
+			for (double weight = 0.1; is_num(*cur); weight *= 0.1)
+				d += weight * (*cur++ - '0');
+		}
+		if (match_ns("E") || match_ns("e")) {
+			int sign = match_ns("-") ? -1 : (match_ns("+"), 1);
+			int exp = 0;
+			for (; *cur >= '0' && *cur < '9'; cur++)
+				exp = exp * 10 + *cur - '0';
+			d *= pow(10, exp * sign);
+		}
+		if (std::fetestexcept(FE_OVERFLOW | FE_UNDERFLOW))
+			error("numeric overflow");
 		match_ws();
-		return true;
+		return d;
 	}
 
-	void error(const string &message) {
-		auto name = dom->get_name(module);
-		std::cerr
-			<< "error:" << message
-			<< " at " << (name ? std::to_string(name) : "<???>")
-			<< ":" << line + 1
-			<< ":" << pos + 1 << std::endl;
+	pin<Name> expect_domain_name(const char* message) {
+		auto id = expect_id(message);
+		auto name = match_domain_name_tail(id, message);
+		return name ? name : ast->dom->names()->get(id);
+	}
+
+	optional<pin<Name>> match_domain_name(const char* message) {
+		auto id = match_id();
+		if (!id)
+			return nullopt;
+		auto name = match_domain_name_tail(*id, message);
+		return name ? name : ast->dom->names()->get(*id);
+	}
+
+	pin<Name> match_domain_name_tail(string id, const char* message) {
+		if (!match("_"))
+			return nullptr;
+		pin<Name> r = dom->names()->get(id)->get(expect_id(message));
+		while (match("_")) {
+			string name_val = expect_id(message);
+			r = r->get(name_val);
+		}
+		return r;
+	}
+
+	template<typename... T>
+	[[noreturn]] void error(const T&... t) {
+		std::cerr << "error:" << ast::format_str(t...) << ":" << line << ":" << pos << std::endl;
 		throw 1;
 	}
 
@@ -739,6 +710,5 @@ void parse(
 	pin<Name> module_name,
 	module_text_provider_t module_text_provider)
 {
-	vector<pin<Name>> active_modules;
-	Parser(ast, module_name).parse(active_modules, module_text_provider);
+	Parser(ast, module_name).parse(module_text_provider);
 }

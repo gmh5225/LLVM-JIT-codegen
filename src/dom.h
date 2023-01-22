@@ -212,16 +212,24 @@ class DomItem: public Object
 {
 	friend class Dom;
 protected:
-	virtual pin<TypeInfo> get_type() =0;
 	virtual char* get_data() { return reinterpret_cast<char*>(this); }
+public:
+	virtual pin<TypeInfo> get_type() const = 0;
+	virtual string get_annotation() { return ""; }
 };
 
 class Dom: public Object {
 	friend class TypeWithFills;
 public:
-	Dom();
+	Dom(pin<Dom> parent = nullptr);
 	pin<Name> names() { return root_name; }
+
+	// Always returns elements of the root (terminal parent) DOM
 	pin<TypeInfo> mk_type(Kind kind, size_t size = 0, pin<TypeInfo> item = nullptr);
+
+	// If contains type in the whole chain of parents, returns it
+	// otherwise adds type to the nearest not sealed DOM
+	// if no such DOM, error.
 	pin<TypeInfo> mk_struct_type(pin<Name> name, vector<pin<FieldInfo>>& fields) { return mk_class_or_struct_type(false, name, fields); }
 	pin<TypeInfo> mk_class_type(pin<Name> name, vector<pin<FieldInfo>>& fields) { return mk_class_or_struct_type(true, name, fields); }
 
@@ -231,8 +239,13 @@ public:
 
 	static pin<TypeInfo> get_type(const pin<DomItem>& item) { return item ? item->get_type() : TypeInfo::empty.pinned(); }
 	static char* get_data(const pin<DomItem>& item) { return item ? item->get_data() : nullptr; }
-	bool sealed;
-	
+
+	// If not null, this DOM searches its types in the whole chain of parents.
+	weak<Dom> parent;
+
+	// If not sealed, this DOM can register new types.
+	bool sealed = false;
+
 protected:
 	pin<TypeInfo> mk_class_or_struct_type(bool is_class, pin<Name> name, vector<pin<FieldInfo>>& fields);
 	void reg_cpp_type(TypeWithFills* type);
@@ -255,16 +268,21 @@ pin<T> strict_cast(const pin<DomItem>& item) {
 	return Dom::get_type(item) == T::dom_type_ ? item.cast<T>() : nullptr;
 }
 
-template<typename MAP, typename KEY>
-typename MAP::value_type* peek(const MAP& dict, const KEY& name) {
+template<typename T> bool isa(const DomItem& v) {
+	return v.get_type() == T::dom_type_;
+}
+
+
+template<typename MAP, typename KEY, typename VAL = MAP::mapped_type::wrapped>
+pin<VAL> peek(const MAP& dict, const KEY& name) {
 	auto it = dict.find(name);
-	return it == dict.end() ? nullptr : &it->second;
+	return it == dict.end() ? nullptr : it->second.pinned();
 }
 
 } // namespace dom
 
 #define DECLARE_DOM_CLASS(NAME) \
-	pin<dom::TypeInfo> get_type() override { return dom_type_; } \
+	pin<dom::TypeInfo> get_type() const override { return dom_type_; } \
 	static own<dom::TypeWithFills> dom_type_; \
 	LTM_COPYABLE(NAME)
 

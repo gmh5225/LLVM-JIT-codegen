@@ -5,7 +5,7 @@ cmake_minimum_required (VERSION 3.8)
 
 set(CMAKE_CXX_STANDARD 17)
 add_definitions(-D_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS)
-find_package(LLVM REQUIRED CONFIG PATHS ../llvm-build/lib/cmake/llvm NO_DEFAULT_PATH)
+find_package(LLVM REQUIRED CONFIG PATHS ../llvm-lib/lib/cmake/llvm NO_DEFAULT_PATH)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 include_directories(${LLVM_INCLUDE_DIRS})
@@ -36,9 +36,13 @@ set(codegen_sources
 
     src/type-checker.h
     src/type-checker.cpp
+
+    src/generator.h
+    src/generator.cpp
+
+    src/vmt_util.h
 )
 add_executable(codegen
-    ${codegen_sources}
     src/main.cpp
 )
 target_link_libraries(codegen ${llvm_libs})
@@ -52,4 +56,6 @@ add_executable(codegen_test
     src/dom-test.cpp
     src/dom-to-string-test.cpp
     src/compiler-test.cpp
+    src/vmt_util-test.cpp
 )
+target_link_libraries(codegen_test ${llvm_libs})

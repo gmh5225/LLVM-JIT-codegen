@@ -1,25 +1,239 @@
-module ModuleName 1; // 1-version
-condition {
-    preconditions
-}
-substitute {
-    list of modules this one can substitute
-}
-import {
-    OtherModuleName 42;   // 42-required version
-    OtherModuleName2 11;
+= Plan:
+    int
+    ops
+    double
+    double ops and conversions
+    functions
+    fn params
+    nested functions
+    lexical contexts
+    inline (blocks, locals)
+    void and sequence
+    optional ? :
+    loop
+    sugar: locals, while, if else
+    assignment
+    structs
+    copy
+    classes
+    interfaces
+    cast    expr_of_type_cls_or_ref~class_or_interface  -> optional(cls_or_ref to class_or_interface)
+    weak
+    functions
+    && ||
+    Separate Type declarations
+    Raii
+    <<--here
+    Blob, WeakArray, OwnArray
+    SDL/SKIA
+    ... mvp, bindings to skia
+    atoms, method dispatchers by atoms
+    unwind
+    delegates
+    type parameters
+    value type parameters
+    immutable classes and interfaces
+    threading
+    continuations
+
+== Unwind
+- first apprioach, let's have a rewind struct in each function {prev*, int count, [ptrs*]} and use that ptrs as temps and locals. use tls `head` and a chain of prev to traverse these structs and dispose all.
+- second approach, let's have a separate stack for ptrs. and a tls `head` var as a stack top.
+
+== High-level syntax
+```
+module name_with_domains.1 // 1-version
+{ // imports
+    other_module_name.42,   // 42-required version
+    module2.3,
+    module3.101,
 }
 
-class ClassName(TypeParam1, TypeParam2) {
-    ImplementedInterface(type params) {
-        implementationMethod1(params) { body }
+class a(typeParam1, typeParam2, typeParam3 : boundClass(type params), typeParam4: *) // by default type param bounded to Object, *-any type, incl value types
+    : base_class(with params)
+{
+    +newMethod(param1:type, param2:type) : result_type { // or @ in place of result type, acsent result - void
+        body_statements
     }
-    BaseClass(type params) {
-        overloadMethod(params) { body }
-        overloadMethod.atom (params) { body }
-    }
-    newMethod(param1 type, param2 type) ResultType {
-        bodyStatements
-    }
+    override_method.atom { body }
     field=initializer;
 }
+```
+
+== If-else priorities
+```
+(a ? (b ? c)) : (d : e)
+(a ? (b)) : ((c ? (d)) : e)
+a ?
+    b
+: c ?
+    d
+: e
+```
+
+== Type syntax (method paramters and results)
+* int, double, bool, void, atom ; primitive
+* ?T ; optional
+* [T] ; array
+* (T,T)T ; lambda
+* &(T,T)T ; delegate
+* fn(T, T)T ; function
+* ClassOrInterface ; mutable pin
+* +T ; any pin
+* *T ; frozen
+* &T ; optional weak or optional weak to frozen
+
+=== Name capture in if-and
+a ? fn(_)
+a ?name fn(name)
+
+== and-or-not
+!a       opt(T) -> opt(void)
+a && b   opt(A) && opt(B) -> opt(B)
+a || b   opt(A) && opt(B) -> opt(common_parent(A, B)) // often common parent is `void`
+&& evals `a`
+- if it's none, result is none opf type opt(B)
+- otherwise
+  - binds unpacked value to name `_` or explicit name, so `_` is of type `A`
+  - executes that should return `opt(B)` possibly using name `_`
+  - this result will be result of operator &&
+The only difference between && and ? is:
+- `&&` requires operand b to return opt()
+- `?` allows operatnd `b` to return anything and packs the result in optional.
+Thus
+- `&&` allows opearnnd `b` to make results indistinguishable from none of type opt(B)
+- in `?` it is impossible to return none from operand `b`, even if `b` returns opt(X), result of `?` will be opt(opt(x)) with value some(none), not just none.
+So `?` and `&&` are not interchangeable.
+
+The same for `||` and `!`.
+|| evals `a`
+- if it is NOT none, returns it as the result of `||`
+- otherwise executes `b` that's result will be the result of || operator. In contrast to `&&` no name binding performed.
+The only difference between || and ! is:
+- `||` return the result of operand `a` AS IS and requires `b` to return compatible `opt(B)` type
+- `!` returns the UNWRAPPED result of `a` and requires `b` to return compatible type `B`.
+
+Name binding example
+tryGetName() &&.name tryGetAge(name) ?.age User(name, age);
+ast:
+    if
+        condition ...
+        then block
+            locals:
+                var._1
+                initializer null
+            actions:
+                ...
+                ref
+                target=_1
+    
+
+    tryGetName()  // opt(string)
+&name  // name` string
+    (
+            tryGetAge(name) // opt(double)
+        ?age  // double
+            User(name, age) // User(string, double)
+    ) // opt(User(string, double))
+// opt(User(string, double))
+
+== sugar
++    ^expr -> false?expr
++    ?expr -> true?expr  
++    name=expr;statements till'}' -> (name){statements}(expr)  // make block
+    if expr {statements} -> expr ? {statements}
+    if expr a{statements using a} -> expr ?a {statements}
++    a ? expr using _ -> a ? {_= <magic>; expr using _}
++    a ?name expr using name -> a ? {name=<magic>; expr using _}
+
+== lambdas:
+{} block // done
+name = initializer; code -> block with locals  // done
+(){}  lambda  //done
+(a, b, c) { }  lambda //done
+name(a, b, c){}  function
+expression.name(a,b,c) {}  delegate
+
+
+== Blocks folding:
+- If a blocks' element is a block with no locals, add its contents in place of it.
++ If block contains one body element, and no locals, replace this block with this element.
++ If block contains one body element of type block, add all its locals to the end of this block locals and move this body element 
+
+== Copy operation
+own pointer == tpClass
+pin pointer == tpRef
+
+getting of own makes it pin,
+only own can be assigned to own
+own created by MkInstance and by @copy operator.
+
+Each class has metadata pointer in its first field.
+This ponter points to a disp function.
+There is a vmt table before disp function.
+The entry_point-1 slot in this table is a pointer to the copy function.
+Copy operator sets-up tls vars, calls this function and finalizes this copy process.
+
+todo later:{
+    copy -> start transaction; copy_field; end_transaction
+    copy_field -> check nulls {alloc(src->vmt->size); memcpy(size); vmt->copy_fields}
+    copy_fields_* -> copy_ptr_to for each field
+}
+
+== Pointer classification
+- temporary pin
+- not owned weak
+- owning mutable
+- shared immutable
+pointer transformations
+@expression - creates uniqque owned mutable hiererchy
+&expression - gets a weak pointer to existing expression, if expression is shared it will be weak pointer to immutable
+weak_expression - dereferences and checks for null/lost/foreign thread - returns optional<pin<T>>
+$expression - creates shared immutable
+  - if expression is already shared, noop
+  - if expression is own_ptr - makes its subtree shared
+  - if expression is pin - makes a copy and makes this copy shared
+
+
+
+== Classes
+Single class parent, multiple interfaces
+vmt [(methods* tbd-class-vmt-ptr-for-casts) tbd-vmt-size tbd-disposer copier instance_size] ^vmt_ptr_points_here (tbd-interface-dispatch, counter)
+
+class name {
+   base_class_or_interface { overloads or implementions }
+   field = val and type
+   new_method(params) { body }
+}
+method = block + name + this_type
+
+instance.method(params)
+or
+method(params) // for this bound methods in methods
+
+call -> callLambda
+callMethod
+
+later:
+    dispatch(tpClass, tpFunction) -> tpDelegate
+    callDelegate(tpDelegate, {parameters}) -> tpAny
+    callFunction
+
+invocable: 
+  lambda: anonimous, stack-only, serializable, bounded to scope
+  function: named, ptr-to function can be stored in fields and serialized, no scope access
+  delegate: combines pointer-to-function and weakptr to `this`
+  method: named, makesdelegate and invoked
+
+extension method is just a function that takes first parameter.
+delegate is a fn+weak
+
+== Documents with undo queue, operation queue, versioning and multithreaded processors
+
+Document is a:
+- pointer to root of the current state.
+- queue of operations
+- list of undo/redo
+
+Document state is immutable-shared, its subitems are also immutable-shared.
+Operation takes one immutable element and produces another. If this element is not a document root, it creates another 

@@ -208,7 +208,7 @@ Object *WeakBlock::get_target() noexcept { return target; }
 void WeakBlock::copy_to(Object *&dst) {
 	if (!target)
 		dst = nullptr;
-	else if (copy_depth == 1 && org_counter & SHARED) {
+	else if (copy_depth == 1 && (org_counter & SHARED)) {
 		retain(this);
 		dst = this;
 	} else {
@@ -225,12 +225,12 @@ void WeakBlock::copy_to(Object *&dst) {
 		case Tag::OBJECT: { // already copied
 			Object *copy = untag_ptr<Object>(target);
 			WeakBlock *cwb = copy->weak_block;
-			if (!cwb || get_ptr_tag(cwb) == Tag::OBJECT) // has no wb yet
-			{
-			cwb = new WeakBlock(cwb, COUNTER_STEP | OWNED);
-			copy->weak_block = tag_ptr<WeakBlock>(cwb, Tag::WEAK_BLOCK);
-			} else
-			cwb = untag_ptr<WeakBlock>(cwb);
+			if (!cwb || get_ptr_tag(cwb) == Tag::OBJECT) { // has no wb yet
+				cwb = new WeakBlock(cwb, COUNTER_STEP | OWNED);
+				copy->weak_block = tag_ptr<WeakBlock>(cwb, Tag::WEAK_BLOCK);
+			} else {
+				cwb = untag_ptr<WeakBlock>(cwb);
+			}
 			dst = Object::retain(cwb);
 			} break;
 		}

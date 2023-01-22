@@ -175,6 +175,7 @@ class own {
 	mutable Object* target;
 
 public:
+	typedef T wrapped;
 	own() noexcept : target() {}
 	own(std::nullptr_t) noexcept : target() {}
 	own(const own& src) { Object::outer_copy_to(src.target, target); }
@@ -290,6 +291,7 @@ class pin {
 	mutable Object* target;
 
 public:
+	typedef T wrapped;
 	pin() noexcept : target() {}
 	pin(std::nullptr_t) noexcept : target() {}
 	pin(const pin& src) noexcept : target(Object::retain(src.target)) {}
@@ -436,6 +438,7 @@ class weak {
 	mutable Object* target;
 
 public:
+	typedef T wrapped;
 	weak() noexcept : target() {}
 	weak(std::nullptr_t) noexcept : target() {}
 	weak(const weak& src) noexcept { Object::outer_copy_to(src.target, target); }
@@ -563,6 +566,8 @@ class iweak {
 	std::ptrdiff_t offset;
 
 public:
+	typedef INTERFACE wrapped;
+
 	template <typename IMPL>
 	iweak(weak<IMPL> impl)
 		: impl(std::move(impl))
@@ -581,12 +586,13 @@ class ipin {
 	pin<Object> holder;
 	INTERFACE* impl;
 
-	public:
+public:
+	typedef INTERFACE wrapped;
+
 	ipin(const iweak<INTERFACE>& weak)
 		: holder(weak.impl)
 		, impl(reinterpret_cast<INTERFACE*>(
-			reinterpret_cast<char*>(holder.operator->()) + weak.offset))
-	{}
+			reinterpret_cast<char*>(holder.operator->()) + weak.offset)) {}
 
 	operator bool() { return holder; }
 	INTERFACE* operator->() { return impl; }

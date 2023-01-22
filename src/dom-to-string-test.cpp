@@ -28,7 +28,7 @@ TEST(DomToString, Basic) {
 	name_field->type->set_string("Andreyka", name_field->get_data(data));
 	age_field->type->set_float(47.5, age_field->get_data(data));
     EXPECT_EQ(std::to_string(root, dom),
-        "andreyka~test~Person\n"  // no raw strings here, we can't predict line endings \n\r vs \n
+        "andreyka_test_Person\n"  // no raw strings here, we can't predict line endings \n\r vs \n
         "name \"Andreyka\"\n"
         "age 47.5\n");
 }
