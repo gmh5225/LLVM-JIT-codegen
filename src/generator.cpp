@@ -138,6 +138,16 @@ struct Object {
 		delete[] reinterpret_cast<char*>(obj);
 		leak_detector_ref(-1);
 	}
+	static Object* retain(Object* obj) {
+		if (obj && size_t(obj) >= 256) {
+			if ((obj->counter & CTR_WEAKLESS) != 0) {
+				obj->counter += CTR_STEP;
+			} else {
+				reinterpret_cast<Weak*>(obj->counter)->org_counter += CTR_STEP;
+			}
+		}
+		return obj;
+	}
 	static void* allocate(size_t size) {
 		auto r = new char[size];
 		leak_detector_ref(1);
@@ -156,7 +166,7 @@ struct Object {
 		return reinterpret_cast<T>(reinterpret_cast<uintptr_t>(ptr) & ~3);
 	}
 
-	static void* copy(Object* src) {
+	static Object* copy(Object* src) {
 		Object* dst = copy_object_field(src);
 		Object* c = nullptr;
 		Weak* wb = nullptr;
@@ -244,6 +254,12 @@ struct Object {
 		int64_t org_counter;  // copy of obj->counter
 	};
 
+	static Weak* retain_weak(Weak* w) {
+		if (w && size_t(w) >= 256)
+			++w->wb_counter;
+		return w;
+	}
+
 	static void release_weak(Weak* w) {
 		if (!w || size_t(w) < 256)
 			return;
@@ -324,19 +340,61 @@ struct Blob : Object {
 	uint64_t size;
 	int64_t* data;
 
-	static void set_size(Blob* b, uint64_t size) {
-		if (size != b->size) {
-			auto new_data = new int64_t[size];
-			if (b->data) {
-				memcpy(new_data, b->data, sizeof(int64_t) * b->size);
-				delete[] b->data;
-			}
-			if (size > b->size)
-				memset(new_data + b->size, 0, sizeof(int64_t) * (size - b->size));
-			b->data = new_data;
-			b->size = size;
-		}
+	static int64_t get_size(Blob* b) {
+		return b->size;
 	}
+	static void insert_items(Blob* b, uint64_t index, uint64_t count) {
+		if (!count || index > b->size)
+			return;
+		auto new_data = new int64_t[b->size + count];
+		memcpy(new_data, b->data, sizeof(int64_t) * index);
+		memset(new_data + index, 0, sizeof(int64_t) * count);
+		memcpy(new_data + index + count, b->data + index, sizeof(int64_t) * (b->size - index));
+		delete[] b->data;
+		b->data = new_data;
+		b->size += count;
+	}
+	static void delete_blob_items(Blob* b, uint64_t index, uint64_t count) {
+		if (!count || index > b->size || index + count > b->size)
+			return;
+		auto new_data = new int64_t[b->size - count];
+		memcpy(new_data, b->data, sizeof(int64_t) * index);
+		memcpy(new_data + index, b->data + index + count, sizeof(int64_t) * (b->size - index));
+		delete[] b->data;
+		b->data = new_data;
+		b->size -= count;
+	}
+	static void delete_array_items(Blob* b, uint64_t index, uint64_t count) {
+		if (!count || index > b->size || index + count > b->size)
+			return;
+		auto data = reinterpret_cast<Object**>(b->data) + index;
+		for (uint64_t i = count; i != 0; i--, data++) {
+			Object::release(*data);
+			*data = nullptr;
+		}
+		delete_blob_items(b, index, count);
+	}
+	static void delete_weak_array_items(Blob* b, uint64_t index, uint64_t count) {
+		if (!count || index > b->size || index + count > b->size)
+			return;
+		auto data = reinterpret_cast<Object::Weak**>(b->data) + index;
+		for (uint64_t i = count; i != 0; i--, data++) {
+			Object::release_weak(*data);
+			*data = nullptr;
+		}
+		delete_blob_items(b, index, count);
+	}
+	static bool move_array_items(Blob* blob, uint64_t a, uint64_t b, uint64_t c) {
+		if (a >= b || b >= c || c > blob->size)
+			return false;
+		auto temp = new uint64_t[b - a];
+		memmove(temp, blob->data + a, sizeof(uint64_t) * (b - a));
+		memmove(blob->data + a, blob->data + b, sizeof(uint64_t) * (c - b));
+		memmove(blob->data + a + (c - b), temp, sizeof(uint64_t) * (b - a));
+		delete[] temp;
+		return true;
+	}
+
 	static int64_t get_at(Blob* b, uint64_t index) {
 		return index < b->size ? b->data[index] : 0;
 	}
@@ -344,7 +402,6 @@ struct Blob : Object {
 		if (index < b->size)
 			b->data[index] = val;
 	}
-
 	static int64_t get_i8_at(Blob* b, uint64_t index) {
 		return index / sizeof(int64_t) < b->size
 			? reinterpret_cast<uint8_t*>(b->data)[index]
@@ -354,22 +411,91 @@ struct Blob : Object {
 		if (index / sizeof(int64_t) < b->size)
 			reinterpret_cast<uint8_t*>(b->data)[index] = static_cast<uint8_t>(val);
 	}
-	static bool copy(Blob* dst, uint64_t dst_index, Blob* src, uint64_t src_index, uint64_t bytes) {
+	static bool blob_copy(Blob* dst, uint64_t dst_index, Blob* src, uint64_t src_index, uint64_t bytes) {
 		if ((src_index + bytes) / sizeof(int64_t) >= src->size || (dst_index + bytes) / sizeof(int64_t) >= dst->size)
 			return false;
-		memcpy(reinterpret_cast<uint8_t*>(dst->data) + dst_index, reinterpret_cast<uint8_t*>(src->data) + src_index, bytes);
+		memmove(reinterpret_cast<uint8_t*>(dst->data) + dst_index, reinterpret_cast<uint8_t*>(src->data) + src_index, bytes);
 		return true;
 	}
 
-	static void copy_ref_fields(void* dst, void* src) {
+	static Object* get_ref_at(Blob* b, uint64_t index) {
+		return index < b->size
+			? Object::retain(reinterpret_cast<Object*>(b->data[index]))
+			: nullptr;
+	}
+	static Object::Weak* get_weak_at(Blob* b, uint64_t index) {
+		return index < b->size
+			? Object::retain_weak(reinterpret_cast<Object::Weak*>(b->data[index]))
+			: nullptr;
+	}
+	static void set_ref_at(Blob* b, uint64_t index, Object* val) {
+		if (index < b->size) {
+			auto dst = reinterpret_cast<Object**>(b->data) + index;
+			val = Object::copy(val);
+			Object::release(*dst);
+			*dst = val;
+		}
+	}
+	static void set_weak_at(Blob* b, uint64_t index, Object::Weak* val) {
+		if (index < b->size) {
+			auto dst = reinterpret_cast<Object::Weak**>(b->data) + index;
+			val = Object::retain_weak(val);
+			Object::release_weak(*dst);
+			*dst = val;
+		}
+	}
+	static void copy_container_fields(void* dst, void* src) {
 		auto d = reinterpret_cast<Blob*>(dst);
 		auto s = reinterpret_cast<Blob*>(src);
 		d->size = s->size;
 		d->data = new int64_t[d->size];
 		memcpy(d->data, s->data, sizeof(int64_t) * d->size);
 	}
-	static void dispose(void* ptr) {
+	static void copy_array_fields(void* dst, void* src) {
+		auto d = reinterpret_cast<Blob*>(dst);
+		auto s = reinterpret_cast<Blob*>(src);
+		d->size = s->size;
+		d->data = new int64_t[d->size];
+		for (
+			auto
+				from = reinterpret_cast<Object**>(s->data),
+				to = reinterpret_cast<Object**>(d->data),
+				term = from + d->size;
+			from < term;
+			from++, to++)
+		{
+			*to = Object::copy_object_field(*from);
+		}
+	}
+	static void copy_weak_array_fields(void* dst, void* src) {
+		auto d = reinterpret_cast<Blob*>(dst);
+		auto s = reinterpret_cast<Blob*>(src);
+		d->size = s->size;
+		d->data = new int64_t[d->size];
+		auto to = reinterpret_cast<void**>(d->data);
+		for (
+			auto
+				from = reinterpret_cast<Object::Weak**>(s->data),
+				term = from + d->size;
+			from < term;
+			from++, to++) {
+			Object::copy_weak_field(to, *from);
+		}
+	}
+	static void dispose_container(void* ptr) {
 		auto p = reinterpret_cast<Blob*>(ptr);
+		delete[] p->data;
+	}
+	static void dispose_array(void* ptr) {
+		auto p = reinterpret_cast<Blob*>(ptr);
+		for (auto ptr = reinterpret_cast<Object**>(p->data), to = ptr + p->size; ptr < to; ptr++)
+			Object::release(*ptr);
+		delete[] p->data;
+	}
+	static void dispose_weak_array(void* ptr) {
+		auto p = reinterpret_cast<Blob*>(ptr);
+		for (auto ptr = reinterpret_cast<Object::Weak**>(p->data), to = ptr + p->size; ptr < to; ptr++)
+			Object::release_weak(*ptr);
 		delete[] p->data;
 	}
 };
@@ -426,6 +552,7 @@ struct Generator : ast::ActionScanner {
 	llvm::Function* fn_release;  // void(Obj*) no_throw
 	llvm::Function* fn_relase_weak;  // void(WB*) no_throw
 	llvm::Function* fn_retain;   // void(Obj*) no_throw
+	llvm::Function* fn_retain_weak;   // void(WB*) no_throw
 	llvm::Function* fn_allocate; // Obj*(size_t)
 	llvm::Function* fn_copy;   // Obj*(Obj*)
 	llvm::Function* fn_mk_weak;   // WB*(Obj*)
@@ -470,6 +597,11 @@ struct Generator : ast::ActionScanner {
 			llvm::FunctionType::get(void_type, { obj_ptr }, false),
 			llvm::Function::InternalLinkage,
 			"retain",
+			*module);
+		fn_retain_weak = llvm::Function::Create(
+			llvm::FunctionType::get(void_type, { weak_block_ptr }, false),
+			llvm::Function::InternalLinkage,
+			"retain_weak",
 			*module);
 		fn_release = llvm::Function::Create(
 			llvm::FunctionType::get(void_type, { obj_ptr }, false),
@@ -533,18 +665,17 @@ struct Generator : ast::ActionScanner {
 		return r;
 	}
 
-	void build_retain(llvm::Value* ptr) {
-		builder->CreateCall(fn_retain,
-				{ builder->CreateBitOrPointerCast(ptr, obj_ptr) });
+	void build_retain(llvm::Value* ptr, bool is_weak) {
+		if (is_weak)
+			builder->CreateCall(fn_retain_weak, { cast_to(ptr, weak_block_ptr) });
+		else
+			builder->CreateCall(fn_retain, { cast_to(ptr, obj_ptr) });
 	}
 	void build_release(llvm::Value* ptr, bool is_weak) {
-		builder->CreateCall(
-			is_weak
-				? fn_relase_weak
-				: fn_release,
-			{ cast_to(ptr, is_weak
-				? weak_block_ptr
-				: obj_ptr) });
+		if (is_weak)
+			builder->CreateCall(fn_relase_weak, { cast_to(ptr, weak_block_ptr) });
+		else 
+			builder->CreateCall(fn_release, { cast_to(ptr, obj_ptr) });
 	}
 	llvm::Value* remove_indirection(const ast::Var& var, llvm::Value* val) {
 		return var.is_mutable || var.captured
@@ -621,7 +752,7 @@ struct Generator : ast::ActionScanner {
 
 	void persist_rfield(Val& val) {
 		if (auto as_rfield = get_if<Val::RField>(&val.lifetime)) {
-			build_retain(val.data);
+			build_retain(val.data, is_weak(val.type));
 			build_release(as_rfield->to_release, false);
 			val.lifetime.emplace<Val::Retained>();
 		}
@@ -632,7 +763,7 @@ struct Generator : ast::ActionScanner {
 		persist_rfield(val);
 		if (auto as_temp = get_if<Val::Temp>(&val.lifetime)) {
 			if (!as_temp->var || (as_temp->var->is_mutable && retain_mutable_locals)) {
-				build_retain(val.data);
+				build_retain(val.data, is_weak(val.type));
 				val.lifetime.emplace<Val::Retained>();
 			}
 		}
@@ -642,7 +773,7 @@ struct Generator : ast::ActionScanner {
 	Val make_retained_or_non_ptr(Val&& src) {
 		auto r = persist_val(move(src));
 		if (get_if<Val::Temp>(&r.lifetime)) {
-			build_retain(r.data);
+			build_retain(r.data, is_weak(r.type));
 			r.lifetime.emplace<Val::Retained>();
 		}
 		return r;
@@ -720,7 +851,7 @@ struct Generator : ast::ActionScanner {
 				? true
 				: is_ptr(p->type);
 			if (p_is_ptr && p->is_mutable)
-				build_retain(&*param_iter);
+				build_retain(&*param_iter, is_weak(p->type));
 			if (p->captured) {
 				auto addr = builder->CreateStructGEP(capture, capture_offsets[p]);
 				builder->CreateStore(p_val, addr);
@@ -741,7 +872,7 @@ struct Generator : ast::ActionScanner {
 		auto result_as_temp = get_if<Val::Temp>(&fn_result.lifetime); // null if not temp
 		auto make_result_retained = [&](bool actual_retain = true) {
 			if (actual_retain)
-				build_retain(fn_result.data);
+				build_retain(fn_result.data, is_weak(fn_result.type));
 			result->lifetime.emplace<Val::Retained>();
 			result_as_temp = nullptr;
 		};
@@ -839,7 +970,7 @@ struct Generator : ast::ActionScanner {
 		for (auto& p : node.names) {
 			if (temp_var == p) { // result is locked by the dying temp ptr.
 				if (!get_if<Val::Retained>(&val_iter->lifetime))
-					build_retain(r.data);
+					build_retain(r.data, is_weak(p->type));
 				result->lifetime.emplace<Val::Retained>();
 			} else if (is_ptr(p->type)) {
 				if (p->is_mutable) {
@@ -1769,6 +1900,31 @@ struct Generator : ast::ActionScanner {
 		return combined_result;
 	}
 
+	void make_fn_retain_weak() {
+		auto bb = llvm::BasicBlock::Create(*context, "", fn_retain_weak);
+		llvm::IRBuilder<> b(bb);
+		auto bb_not_null = llvm::BasicBlock::Create(*context, "", fn_retain_weak);
+		auto bb_null = llvm::BasicBlock::Create(*context, "", fn_retain_weak);
+		b.CreateCondBr(
+			b.CreateCmp(llvm::CmpInst::Predicate::ICMP_UGT,
+				b.CreateBitOrPointerCast(&*fn_retain_weak->arg_begin(), tp_int_ptr),
+				llvm::ConstantInt::get(tp_int_ptr, 256)),
+			bb_not_null,
+			bb_null);
+		b.SetInsertPoint(bb_not_null);
+		auto counter_addr = b.CreateStructGEP(
+			b.CreateBitOrPointerCast(&*fn_retain_weak->arg_begin(), weak_block_ptr),
+			1);
+		b.CreateStore(
+			b.CreateAdd(
+				b.CreateLoad(counter_addr),
+				llvm::ConstantInt::get(tp_int_ptr, 1)),
+			counter_addr);
+		b.CreateBr(bb_null);
+		b.SetInsertPoint(bb_null);
+		b.CreateRetVoid();
+	}
+
 	void make_fn_retain() {
 		auto bb = llvm::BasicBlock::Create(*context, "", fn_retain);
 		llvm::IRBuilder<> b(bb);
@@ -1816,6 +1972,8 @@ struct Generator : ast::ActionScanner {
 
 	llvm::orc::ThreadSafeModule build() {
 		make_fn_retain();
+		make_fn_retain_weak();
+		std::unordered_set<pin<ast::TpClass>> special_copy_and_dispose = { ast->blob->base_class, ast->blob, ast->own_array, ast->weak_array };
 		dispatcher_fn_type = llvm::FunctionType::get(void_ptr_type, { int_type }, false);
 		auto dispos_fn_type = llvm::FunctionType::get(void_type, { obj_ptr }, false);
 		auto copier_fn_type = llvm::FunctionType::get(
@@ -1948,7 +2106,7 @@ struct Generator : ast::ActionScanner {
 			builder.CreateStore(info.dispatcher, builder.CreateStructGEP(typed_result, 0));
 			builder.CreateRet(typed_result);
 			// Disposer
-			if (cls != ast->blob) {
+			if (special_copy_and_dispose.count(cls) == 0) {
 				builder.SetInsertPoint(llvm::BasicBlock::Create(*context, "", info.dispose));
 				if (auto manual_disposer_name = cls->name->peek("dispose")) {
 					if (auto& manual_disposer_fn = ast->functions_by_names.find(manual_disposer_name); manual_disposer_fn != ast->functions_by_names.end()) {
@@ -1972,7 +2130,7 @@ struct Generator : ast::ActionScanner {
 			// Copier
 			info.copier = llvm::Function::Create(copier_fn_type, llvm::Function::InternalLinkage,
 				std::to_string(cls->name.pinned()) + "!copy", module.get());
-			if (cls != ast->blob) {
+			if (special_copy_and_dispose.count(cls) == 0) {
 				builder.SetInsertPoint(llvm::BasicBlock::Create(*context, "", info.copier));
 				if (auto manual_fixer_name = cls->name->peek("afterCopy")) {
 					if (auto& manual_fixer_fn = ast->functions_by_names.find(manual_fixer_name); manual_fixer_fn != ast->functions_by_names.end()) {
@@ -2124,14 +2282,33 @@ int64_t execute(llvm::orc::ThreadSafeModule module, bool dump_ir) {
 		{ es.intern("mk_weak"), { llvm::pointerToJITTargetAddress(&Object::mk_weak), llvm::JITSymbolFlags::Callable} },
 		{ es.intern("deref_weak"), { llvm::pointerToJITTargetAddress(&Object::deref_weak), llvm::JITSymbolFlags::Callable} },
 		{ es.intern("reg_copy_fixer"), { llvm::pointerToJITTargetAddress(&Object::reg_copy_fixer), llvm::JITSymbolFlags::Callable} },
-		{ es.intern("sys_Blob!copy"), { llvm::pointerToJITTargetAddress(&Blob::copy_ref_fields), llvm::JITSymbolFlags::Callable} },
-		{ es.intern("sys_Blob!dtor"), { llvm::pointerToJITTargetAddress(&Blob::dispose), llvm::JITSymbolFlags::Callable} },
-		{ es.intern("sys_Blob_resize"), { llvm::pointerToJITTargetAddress(&Blob::set_size), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_Container!copy"), { llvm::pointerToJITTargetAddress(&Blob::copy_container_fields), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_Container!dtor"), { llvm::pointerToJITTargetAddress(&Blob::dispose_container), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_Container_size"), { llvm::pointerToJITTargetAddress(&Blob::get_size), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_Container_insert"), { llvm::pointerToJITTargetAddress(&Blob::insert_items), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_Container_move"), { llvm::pointerToJITTargetAddress(&Blob::move_array_items), llvm::JITSymbolFlags::Callable} },
+
+		{ es.intern("sys_Blob!copy"), { llvm::pointerToJITTargetAddress(&Blob::copy_container_fields), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_Blob!dtor"), { llvm::pointerToJITTargetAddress(&Blob::dispose_container), llvm::JITSymbolFlags::Callable} },
 		{ es.intern("sys_Blob_getAt"), { llvm::pointerToJITTargetAddress(&Blob::get_at), llvm::JITSymbolFlags::Callable} },
 		{ es.intern("sys_Blob_setAt"), { llvm::pointerToJITTargetAddress(&Blob::set_at), llvm::JITSymbolFlags::Callable} },
 		{ es.intern("sys_Blob_getByteAt"), { llvm::pointerToJITTargetAddress(&Blob::get_i8_at), llvm::JITSymbolFlags::Callable} },
 		{ es.intern("sys_Blob_setByteAt"), { llvm::pointerToJITTargetAddress(&Blob::set_i8_at), llvm::JITSymbolFlags::Callable} },
 		{ es.intern("sys_Blob_copy"), { llvm::pointerToJITTargetAddress(&Blob::copy), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_Blob_delete"), { llvm::pointerToJITTargetAddress(&Blob::delete_blob_items), llvm::JITSymbolFlags::Callable} },
+
+		{ es.intern("sys_Array!copy"), { llvm::pointerToJITTargetAddress(&Blob::copy_array_fields), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_Array!dtor"), { llvm::pointerToJITTargetAddress(&Blob::dispose_array), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_Array_getAt"), { llvm::pointerToJITTargetAddress(&Blob::get_ref_at), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_Array_setAt"), { llvm::pointerToJITTargetAddress(&Blob::set_ref_at), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_Array_delete"), { llvm::pointerToJITTargetAddress(&Blob::delete_array_items), llvm::JITSymbolFlags::Callable} },
+
+		{ es.intern("sys_WeakArray!copy"), { llvm::pointerToJITTargetAddress(&Blob::copy_weak_array_fields), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_WeakArray!dtor"), { llvm::pointerToJITTargetAddress(&Blob::dispose_weak_array), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_WeakArray_getAt"), { llvm::pointerToJITTargetAddress(&Blob::get_weak_at), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_WeakArray_setAt"), { llvm::pointerToJITTargetAddress(&Blob::set_weak_at), llvm::JITSymbolFlags::Callable} },
+		{ es.intern("sys_WeakArray_delete"), { llvm::pointerToJITTargetAddress(&Blob::delete_weak_array_items), llvm::JITSymbolFlags::Callable} },
+
 		{ es.intern("sys_foreignTestFunction"), { llvm::pointerToJITTargetAddress(foreign_test_function), llvm::JITSymbolFlags::Callable} } }));
 	check(jit->addIRModule(std::move(module)));
 	auto f_main = check(jit->lookup("main"));

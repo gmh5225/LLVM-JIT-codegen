@@ -379,24 +379,21 @@ bool typelist_comparer::operator() (const vector<own<Type>>* a, const vector<own
 Ast::Ast()
 	: dom(new dom::Dom(cpp_dom)) {
 	auto sys = dom->names()->get("sys");
-	auto obj = new TpClass;
-	classes.push_back(obj);
-	obj->name = sys->get("Object");
-	classes_by_names[obj->name] = obj;
-	object = obj;
-	auto blob = new TpClass;
-	classes.push_back(blob);
-	blob->name = sys->get("Blob");
-	classes_by_names[blob->name] = blob;
-	this->blob = blob;
+	auto mk_class = [&](const char* name, std::initializer_list<pin<Field>> fields = {}) {
+		auto r = new TpClass;
+		classes.push_back(r);
+		r->name = sys->get(name);
+		classes_by_names[r->name] = r;
+		for (auto& f : fields)
+			r->fields.push_back(f);
+		return r;
+	};
 	auto mk_field = [&](const char* name, pin<Action> initializer) {
 		auto f = pin<Field>::make();
 		f->name = sys->get(name);
 		f->initializer = initializer;
 		return f;
 	};
-	blob->fields.push_back(mk_field("size", new ConstInt64));
-	blob->fields.push_back(mk_field("_data", new ConstInt64));
 	auto mk_fn = [&](pin<dom::Name> name, pin<Action> result_type, std::initializer_list<pin<Type>> params) {
 		auto fn = pin<ast::Function>::make();
 		functions.push_back(fn);
@@ -409,12 +406,40 @@ Ast::Ast()
 			fn->names.back()->type = p;
 		}
 	};
-	mk_fn(sys->get("Blob")->get("resize"), new ConstVoid, { get_ref(blob), tp_int64() });
+	object = mk_class("Object");
+	auto container = mk_class("Container", {
+		mk_field("_size", new ConstInt64),
+		mk_field("_data", new ConstInt64) });
+	mk_fn(sys->get("Container")->get("size"), new ConstInt64, { get_ref(container) });
+	mk_fn(sys->get("Container")->get("insert"), new ConstVoid, { get_ref(container), tp_int64(), tp_int64()});
+	mk_fn(sys->get("Container")->get("move"), new ConstBool, { get_ref(container), tp_int64(), tp_int64(), tp_int64() });
+	blob = mk_class("Blob");
+	blob->overloads[container];
 	mk_fn(sys->get("Blob")->get("getAt"), new ConstInt64, { get_ref(blob), tp_int64() });
 	mk_fn(sys->get("Blob")->get("setAt"), new ConstVoid, { get_ref(blob), tp_int64(), tp_int64() });
 	mk_fn(sys->get("Blob")->get("getByteAt"), new ConstInt64, { get_ref(blob), tp_int64() });
 	mk_fn(sys->get("Blob")->get("setByteAt"), new ConstVoid, { get_ref(blob), tp_int64(), tp_int64() });
-	mk_fn(sys->get("Blob")->get("copy"), new ConstBool, { get_ref(blob), tp_int64(), get_ref(blob), tp_int64(), tp_int64() });
+	mk_fn(sys->get("Blob")->get("delete"), new ConstVoid, { get_ref(container), tp_int64(), tp_int64() });
+	mk_fn(sys->get("Blob")->get("copy"), new ConstBool, { get_ref(blob), tp_int64(), get_ref(container), tp_int64(), tp_int64() });
+	auto inst = new ast::MkInstance;
+	inst->cls = object.pinned();
+	auto ref_to_object = new ast::RefOp;
+	ref_to_object->p = inst;
+	auto opt_ref_to_object = new ast::If;
+	opt_ref_to_object->p[0] = new ast::ConstBool;
+	opt_ref_to_object->p[1] = ref_to_object;
+	own_array = mk_class("Array");
+	own_array->overloads[container];
+	mk_fn(sys->get("Array")->get("getAt"), opt_ref_to_object, { get_ref(own_array), tp_int64() });
+	mk_fn(sys->get("Array")->get("setAt"), new ConstVoid, { get_ref(own_array), tp_int64(), object });
+	mk_fn(sys->get("Array")->get("delete"), new ConstVoid, { get_ref(container), tp_int64(), tp_int64() });
+	weak_array = mk_class("WeakArray");
+	weak_array->overloads[container];
+	auto weak_to_object = new ast::MkWeakOp;
+	weak_to_object->p = inst;
+	mk_fn(sys->get("WeakArray")->get("getAt"), weak_to_object, { get_ref(own_array), tp_int64() });
+	mk_fn(sys->get("WeakArray")->get("setAt"), new ConstVoid, { get_ref(own_array), tp_int64(), get_weak(object) });
+	mk_fn(sys->get("WeakArray")->get("delete"), new ConstVoid, { get_ref(container), tp_int64(), tp_int64() });
 }
 
 pin<TpInt64> Ast::tp_int64() {

@@ -52,8 +52,11 @@ struct NameResolver : ast::ActionScanner {
 			for (auto& i : base.first->overloads)
 				indirect_bases_to_add.insert(i.first);
 		}
-		if (!c->base_class && c != ast->object)
+		if (!c->base_class && c != ast->object) {
 			c->base_class = ast->object;
+			indirect_bases_to_add.insert(ast->object);
+			order_class(ast->object);
+		}
 		active_base_list.erase(c);
 		for (auto& i : indirect_bases_to_add)
 			c->overloads[i]; // insert one if it's not there yet.

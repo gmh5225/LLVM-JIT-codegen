@@ -179,6 +179,8 @@ struct Ast: dom::DomItem {
 	own<Function> entry_point;
 	weak<TpClass> object;
 	weak<TpClass> blob;
+	weak<TpClass> own_array;
+	weak<TpClass> weak_array;
 	vector<own<TpClass>> classes;
 	vector<own<struct Function>> functions;
 

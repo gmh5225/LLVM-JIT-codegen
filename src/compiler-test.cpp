@@ -36,10 +36,30 @@ int64_t execute(const char* source_text, bool dump_all = false) {
 
 
 
+TEST(Parser, Arrays) {
+    ASSERT_EQ(42, execute(R"(
+        class Node {
+            x = 1;
+            y = 0;
+        }
+        a = sys_Array;
+        sys_Container_insert(a, 0, 10);
+        a[0] := Node;
+        a[1] := Node;
+        a[1]&&_~Node?{
+            _.x := 42;
+            _.y := 33;
+        };
+        c = @a;
+        sys_Array_delete(c, 0, 1);
+        c[0]&&_~Node?_.x : -1
+    )"));
+}
+
 TEST(Parser, BlobsAndIndexes) {
     ASSERT_EQ(42, execute(R"(
         b = sys_Blob;
-        sys_Blob_resize(b, 3);
+        sys_Container_insert(b, 0, 3);
         b[1] := 42;
         c = @b;
         c[1]
