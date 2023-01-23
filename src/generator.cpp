@@ -1242,7 +1242,10 @@ struct Generator : ast::ActionScanner {
 			llvm::Value* rhs;
 			Generator& gen;
 			void compare_scalar() {
-				gen.result->data = gen.builder->CreateCmp(llvm::CmpInst::Predicate::ICMP_EQ, lhs, rhs);
+				gen.result->data = gen.builder->CreateCmp(
+					llvm::CmpInst::Predicate::ICMP_EQ,
+					gen.cast_to(lhs, rhs->getType()),
+					rhs);
 			}
 			void compare_pair() {
 				auto cond1 = gen.builder->CreateCmp(

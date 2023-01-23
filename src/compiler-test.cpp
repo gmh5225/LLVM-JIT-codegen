@@ -36,6 +36,23 @@ int64_t execute(const char* source_text, bool dump_all = false) {
 
 
 
+TEST(Parser, WeakArrays) {
+    ASSERT_EQ(1, execute(R"(
+        class Node {
+            x = 1;
+            y = 0;
+        }
+        n = Node;
+        a = sys_WeakArray;
+        sys_Container_insert(a, 0, 10);
+        a[0] := &n;
+        a[1] := &n;
+        c = @a;
+        sys_WeakArray_delete(c, 0, 1);
+        c[0]&&_==n ? 1:0
+    )"));
+}
+
 TEST(Parser, Arrays) {
     ASSERT_EQ(42, execute(R"(
         class Node {

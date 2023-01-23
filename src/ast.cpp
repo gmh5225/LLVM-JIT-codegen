@@ -419,7 +419,7 @@ Ast::Ast()
 	mk_fn(sys->get("Blob")->get("setAt"), new ConstVoid, { get_ref(blob), tp_int64(), tp_int64() });
 	mk_fn(sys->get("Blob")->get("getByteAt"), new ConstInt64, { get_ref(blob), tp_int64() });
 	mk_fn(sys->get("Blob")->get("setByteAt"), new ConstVoid, { get_ref(blob), tp_int64(), tp_int64() });
-	mk_fn(sys->get("Blob")->get("delete"), new ConstVoid, { get_ref(container), tp_int64(), tp_int64() });
+	mk_fn(sys->get("Blob")->get("delete"), new ConstVoid, { get_ref(blob), tp_int64(), tp_int64() });
 	mk_fn(sys->get("Blob")->get("copy"), new ConstBool, { get_ref(blob), tp_int64(), get_ref(container), tp_int64(), tp_int64() });
 	auto inst = new ast::MkInstance;
 	inst->cls = object.pinned();
@@ -432,14 +432,14 @@ Ast::Ast()
 	own_array->overloads[container];
 	mk_fn(sys->get("Array")->get("getAt"), opt_ref_to_object, { get_ref(own_array), tp_int64() });
 	mk_fn(sys->get("Array")->get("setAt"), new ConstVoid, { get_ref(own_array), tp_int64(), object });
-	mk_fn(sys->get("Array")->get("delete"), new ConstVoid, { get_ref(container), tp_int64(), tp_int64() });
+	mk_fn(sys->get("Array")->get("delete"), new ConstVoid, { get_ref(own_array), tp_int64(), tp_int64() });
 	weak_array = mk_class("WeakArray");
 	weak_array->overloads[container];
 	auto weak_to_object = new ast::MkWeakOp;
 	weak_to_object->p = inst;
-	mk_fn(sys->get("WeakArray")->get("getAt"), weak_to_object, { get_ref(own_array), tp_int64() });
-	mk_fn(sys->get("WeakArray")->get("setAt"), new ConstVoid, { get_ref(own_array), tp_int64(), get_weak(object) });
-	mk_fn(sys->get("WeakArray")->get("delete"), new ConstVoid, { get_ref(container), tp_int64(), tp_int64() });
+	mk_fn(sys->get("WeakArray")->get("getAt"), weak_to_object, { get_ref(weak_array), tp_int64() });
+	mk_fn(sys->get("WeakArray")->get("setAt"), new ConstVoid, { get_ref(weak_array), tp_int64(), get_weak(object) });
+	mk_fn(sys->get("WeakArray")->get("delete"), new ConstVoid, { get_ref(weak_array), tp_int64(), tp_int64() });
 }
 
 pin<TpInt64> Ast::tp_int64() {
